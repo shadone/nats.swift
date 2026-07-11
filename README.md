@@ -44,7 +44,8 @@ Currently, the client supports **Core NATS** with auth, TLS, lame duck mode and 
   `unlimitedReconnects()`.
 
 The whole package builds under **Swift 6 language mode**
-(`swiftLanguageModes: [.v6]`) with strict concurrency enforced.
+(`swiftLanguageModes: [.v6]`) with strict concurrency enforced. Benchmarks and a
+performance baseline are in [PERF.md](./PERF.md) (harness: `Sources/PerfBench`).
 
 ### JetStream KeyValue quick look
 

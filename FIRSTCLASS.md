@@ -15,10 +15,10 @@ clients build it, as a real contribution to the library.
 
 ## What was delivered
 
-Fifteen reviewed, tested, committed features. Every commit builds clean, passes
+Fifteen reviewed, tested, committed features, then a performance + chaos hardening pass. Every commit builds clean, passes
 against a real `nats-server` (v2.12.7), is `swift format`-clean, and was
 reviewed by an independent pass (correctness + Swift-6 concurrency) with
-findings fixed before commit. The final suite is **280 tests, 0 failures**.
+findings fixed before commit. The final suite is **287 tests, 0 failures**.
 
 | Commit | Feature |
 | --- | --- |
@@ -37,7 +37,10 @@ findings fixed before commit. The final suite is **280 tests, 0 failures**.
 | `ddacd92` | **Per-message TTL + KV per-key TTL** (NATS 2.11+) |
 | `60ec898` | **ObjectStore streaming put/get** |
 | `c5f8be1` | **Durable push consumers + queue/deliver groups** |
-| `ccc7f89` | this report + README |
+| `76a1f79` | **PerfBench** performance harness (full-surface benchmarks) |
+| `3ad7aae` | **Chaos/correctness suite** — consumer resets + KV CAS under concurrency |
+| `d3bc2e3` | **Push-delivery hot-path fix** — ~7× push-with-heartbeat throughput |
+| `ccc7f89` | this report + README (perf record in `PERF.md`) |
 
 ### The keystone: an ordered push consumer
 
@@ -107,6 +110,29 @@ Both are wire-compatible with the whole NATS ecosystem, proven by **bidirectiona
   iterated and stopped from different tasks, and a `#file → #filePath` fix for
   v6's `ConciseMagicFile`). Debug and release build clean; all tests pass.
 
+### Hardening: performance and chaos testing
+
+Before recommending this for production, the keystone was measured and stress-
+tested, not just feature-completed:
+
+- **A `PerfBench` harness** benchmarks the whole surface (core pub/sub, req/reply
+  latency, JetStream publish, KV, ObjectStore, and pull/push/ordered/heartbeat
+  consumers) against a real `nats-server`. The full baseline and methodology are
+  in `PERF.md`.
+- **It surfaced a real hot-path bug.** Push delivery with an idle heartbeat ran
+  at ~1/5 the throughput of push without one, because `PushDelivery.race()` built
+  a two-child task group on *every* message; the ordered consumer, which forces
+  heartbeat on, could never avoid it. A non-suspending `tryNext()` poll now takes
+  an already-buffered message directly and only enters the task group when the
+  inbox is idle (where missed-heartbeat detection belongs). Result: push-with-
+  heartbeat throughput up ~7× (the recommended production config), with no change
+  to semantics — verified by adversarial review and the chaos suite.
+- **A chaos/correctness suite** drives the ordered consumer through repeated
+  mid-stream resets and live consume-while-publishing (asserting contiguous, no-
+  loss/no-dup delivery), a heartbeat push consumer under load, and concurrent
+  optimistic KV CAS (a regression guard for the `AckFuture` bug below). All green
+  and non-flaky across repeated runs.
+
 ## A bug fixed for everyone, not just KV
 
 Implementing KV's optimistic concurrency surfaced a latent bug in the base
@@ -133,11 +159,12 @@ sequentially, which set the pace more than the difficulty did.
 
 ### By the numbers
 
-- **18 commits**, ~+13,026 / -98 lines (~7,299 net Sources LOC): the KV store,
-  the ordered/push consumer engine, the public consumer API, the ObjectStore
-  (incl. streaming IO), the `Services` module, per-message + KV TTL, durable/
-  queue-group push consumers, and the Swift 6 language-mode adoption.
-- **280 tests, 0 failures** against a real `nats-server`, including
+- **23 commits**: the KV store, the ordered/push consumer engine, the public
+  consumer API, the ObjectStore (incl. streaming IO), the `Services` module,
+  per-message + KV TTL, durable/queue-group push consumers, the Swift 6 language-
+  mode adoption, and the performance/chaos hardening (harness, suite, hot-path
+  fix).
+- **287 tests, 0 failures** against a real `nats-server`, including
   bidirectional `nats`-CLI interop for KV/ObjectStore/Services, deterministic
   reset/recovery tests (delete the consumer mid-watch → resume with no gap or
   dup), and leak tests each shown to fail without their fix.
