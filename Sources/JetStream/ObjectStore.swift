@@ -282,7 +282,236 @@ public final class ObjectStore {
         _ = try await stream.purge(subject: chunkSubj)
     }
 
+    // MARK: - Watch
+
+    /// Watches every object in the bucket. The returned ``ObjectStoreWatcher`` first
+    /// delivers the current ``ObjectInfo`` of each object, then a `nil` marker, then live
+    /// updates.
+    ///
+    /// - Parameter opts: the watch options.
+    ///
+    /// - Returns: an ``ObjectStoreWatcher``. Call ``ObjectStoreWatcher/stop()`` when done.
+    ///
+    /// > **Throws:** the underlying create error if the backing stream is missing or the
+    /// > consumer cannot be created (fail-fast, mirroring nats.go).
+    public func watch(
+        opts: ObjectStoreWatchOptions = .init()
+    ) async throws -> ObjectStoreWatcher {
+        // Pass the stream NAME string (never the `Stream` instance) so the long-lived
+        // watcher pump cannot race a concurrent `Stream.info` mutation, exactly as KV does.
+        let watcher = ObjectStoreWatcher(
+            ctx: ctx,
+            streamName: ObjectStoreCoding.streamName(forBucket: bucket),
+            filterSubject: ObjectStoreCoding.allMetaSubject(forBucket: bucket),
+            opts: opts)
+        try await watcher.start()
+        return watcher
+    }
+
+    // MARK: - List
+
+    /// Lists information about the objects in the store.
+    ///
+    /// - Parameter showDeleted: when `true`, objects marked as deleted are included.
+    ///
+    /// - Returns: the objects' ``ObjectInfo``.
+    ///
+    /// > **Throws:**
+    /// > - ``JetStreamError/ObjectStoreError/noObjectsFound`` if the store holds no
+    /// >   matching objects.
+    public func list(showDeleted: Bool = false) async throws -> [ObjectInfo] {
+        var opts = ObjectStoreWatchOptions()
+        opts.ignoreDeletes = !showDeleted
+        let watcher = try await watch(opts: opts)
+
+        var objects: [ObjectInfo] = []
+        do {
+            for try await entry in watcher {
+                guard let entry else {
+                    break  // nil marker: all initial values received.
+                }
+                objects.append(entry)
+            }
+        } catch {
+            await watcher.stop()
+            throw error
+        }
+        await watcher.stop()
+
+        if objects.isEmpty {
+            throw JetStreamError.ObjectStoreError.noObjectsFound
+        }
+        return objects
+    }
+
+    // MARK: - UpdateMeta
+
+    /// Updates the mutable metadata of an object: its name, description, headers and
+    /// user metadata. The instance fields (`nuid`, `size`, `chunks`, `digest`) and the
+    /// options (`link`, `chunkSize`) are never changed — those are managed internally.
+    ///
+    /// Renaming an object (`meta.name != name`) moves its meta to the new name and purges
+    /// the old meta subject so the old name disappears.
+    ///
+    /// - Parameters:
+    ///   - name: the current name of the object.
+    ///   - meta: the new metadata. `meta.name` may differ from `name` to rename.
+    ///
+    /// > **Throws:**
+    /// > - ``JetStreamError/ObjectStoreError/updateMetaDeleted`` if the object does not
+    /// >   exist or is deleted.
+    /// > - ``JetStreamError/ObjectStoreError/objectAlreadyExists`` if renaming onto a name
+    /// >   already held by a live object.
+    public func updateMeta(_ name: String, meta: ObjectMeta) async throws {
+        let info: ObjectInfo
+        do {
+            info = try await getInfo(name, showDeleted: true)
+        } catch JetStreamError.ObjectStoreError.objectNotFound {
+            throw JetStreamError.ObjectStoreError.updateMetaDeleted
+        }
+        if info.deleted {
+            throw JetStreamError.ObjectStoreError.updateMetaDeleted
+        }
+
+        // If renaming, the target name must not already be held by a live object.
+        if meta.name != name {
+            if let existing = try await infoOrNil(meta.name), !existing.deleted {
+                throw JetStreamError.ObjectStoreError.objectAlreadyExists
+            }
+        }
+
+        // Overwrite ONLY the mutable meta fields; keep options/nuid/size/chunks/digest.
+        var updated = info
+        updated.name = meta.name
+        updated.description = meta.description
+        updated.headers = meta.headers
+        updated.metadata = meta.metadata
+        try await publishMeta(updated)
+
+        // On rename the meta now lives under the new name; purge the old meta subject so
+        // the old name no longer resolves.
+        if meta.name != name {
+            let oldMetaSubj = ObjectStoreCoding.metaSubject(forBucket: bucket, name: name)
+            _ = try await stream.purge(subject: oldMetaSubj)
+        }
+    }
+
+    // MARK: - Links
+
+    /// Adds a link object that points to another object.
+    ///
+    /// - Parameters:
+    ///   - name: the name of the new link object.
+    ///   - object: the object being linked to.
+    ///
+    /// - Returns: the ``ObjectInfo`` of the created link.
+    ///
+    /// > **Throws:**
+    /// > - ``JetStreamError/ObjectStoreError/nameRequired`` if `name` is empty.
+    /// > - ``JetStreamError/ObjectStoreError/objectRequired`` if the target object has an
+    /// >   empty name.
+    /// > - ``JetStreamError/ObjectStoreError/noLinkToDeleted`` if the target is deleted.
+    /// > - ``JetStreamError/ObjectStoreError/noLinkToLink`` if the target is itself a link.
+    /// > - ``JetStreamError/ObjectStoreError/objectAlreadyExists`` if `name` already holds
+    /// >   a non-link object (an existing link may be overwritten).
+    @discardableResult
+    public func addLink(_ name: String, to object: ObjectInfo) async throws -> ObjectInfo {
+        guard !name.isEmpty else {
+            throw JetStreamError.ObjectStoreError.nameRequired
+        }
+        guard !object.name.isEmpty else {
+            throw JetStreamError.ObjectStoreError.objectRequired
+        }
+        if object.deleted {
+            throw JetStreamError.ObjectStoreError.noLinkToDeleted
+        }
+        if object.isLink {
+            throw JetStreamError.ObjectStoreError.noLinkToLink
+        }
+        try await assertNameNotHeldByObject(name)
+
+        let link = ObjectLink(bucket: object.bucket, name: object.name)
+        return try await publishLink(name: name, link: link)
+    }
+
+    /// Adds a link object that points to a whole other object store (like a directory).
+    ///
+    /// - Parameters:
+    ///   - name: the name of the new link object.
+    ///   - store: the object store being linked to.
+    ///
+    /// - Returns: the ``ObjectInfo`` of the created link.
+    ///
+    /// > **Throws:**
+    /// > - ``JetStreamError/ObjectStoreError/nameRequired`` if `name` is empty.
+    /// > - ``JetStreamError/ObjectStoreError/objectAlreadyExists`` if `name` already holds
+    /// >   a non-link object (an existing link may be overwritten).
+    @discardableResult
+    public func addBucketLink(_ name: String, to store: ObjectStore) async throws -> ObjectInfo {
+        guard !name.isEmpty else {
+            throw JetStreamError.ObjectStoreError.nameRequired
+        }
+        try await assertNameNotHeldByObject(name)
+
+        let link = ObjectLink(bucket: store.bucket, name: nil)
+        return try await publishLink(name: name, link: link)
+    }
+
+    // MARK: - Seal / Status
+
+    /// Seals the object store: the backing stream is marked sealed and no further
+    /// modifications (puts, deletes, meta updates) are allowed.
+    ///
+    /// Only `sealed` is set; the server enforces a sealed stream as fully immutable, so
+    /// there is no need to also deny delete/purge.
+    public func seal() async throws {
+        let info = try await stream.info()
+        var cfg = info.config
+        cfg.sealed = true
+        _ = try await ctx.updateStream(cfg: cfg)
+    }
+
+    /// Retrieves the current status and configuration of the bucket, refreshing the
+    /// backing stream info.
+    ///
+    /// - Returns: the ``ObjectStoreStatus``.
+    public func status() async throws -> ObjectStoreStatus {
+        let info = try await stream.info()
+        return ObjectStoreStatus(bucket: bucket, streamInfo: info)
+    }
+
     // MARK: - Internals
+
+    /// Fetches the meta for `name` including deleted objects, returning nil when absent.
+    private func infoOrNil(_ name: String) async throws -> ObjectInfo? {
+        do {
+            return try await getInfo(name, showDeleted: true)
+        } catch JetStreamError.ObjectStoreError.objectNotFound {
+            return nil
+        }
+    }
+
+    /// The shared overwrite guard for the link operations: a non-link object already at
+    /// `name` blocks the link; an existing link at `name` may be overwritten (object.go:
+    /// 1023-1030 / 1063-1070).
+    private func assertNameNotHeldByObject(_ name: String) async throws {
+        if let existing = try await infoOrNil(name), !existing.isLink {
+            throw JetStreamError.ObjectStoreError.objectAlreadyExists
+        }
+    }
+
+    /// Publishes a link's meta (no chunks) under `name` and returns its info with a
+    /// caller-facing `modTime` (the value stored on the wire is the zero time).
+    private func publishLink(name: String, link: ObjectLink) async throws -> ObjectInfo {
+        let meta = ObjectMeta(name: name, options: ObjectMetaOptions(link: link))
+        let info = ObjectInfo(
+            meta: meta, bucket: bucket, nuid: nextNuid(), size: 0, chunks: 0, digest: nil,
+            modTime: ObjectStoreCoding.zeroTime)
+        try await publishMeta(info)
+        var result = info
+        result.modTime = ObjectStoreCoding.nowTimestamp()
+        return result
+    }
 
     /// Fetches the info, then reassembles and verifies the object's chunks.
     private func read(name: String, showDeleted: Bool) async throws -> ObjectResult {

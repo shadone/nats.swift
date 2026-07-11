@@ -56,6 +56,12 @@ enum ObjectStoreCoding {
         "$O.\(bucket).M.\(encodeName(name))"
     }
 
+    /// The wildcard subject covering every object's meta, `$O.<bucket>.M.>`. This is the
+    /// filter an object-store watcher consumes.
+    static func allMetaSubject(forBucket bucket: String) -> String {
+        "$O.\(bucket).M.>"
+    }
+
     /// Encodes an object name as PADDED URL-safe base64 of its UTF-8 bytes, matching
     /// Go's `base64.URLEncoding.EncodeToString`.
     static func encodeName(_ name: String) -> String {
@@ -172,5 +178,15 @@ enum ObjectStoreCoding {
     /// `modTime` returned from a put (the value stored on the wire is the zero time).
     static func nowTimestamp() -> String {
         rfc3339Formatter.string(from: Date())
+    }
+
+    /// Converts a JetStream ACK-metadata timestamp (Unix nanoseconds as a string) to an
+    /// RFC3339 string, so a watched object's `modTime` matches the format
+    /// ``ObjectStore/getInfo(_:showDeleted:)`` derives from a stored message. Falls back
+    /// to the raw token when it is not an integer count of nanoseconds.
+    static func modTime(fromMetadataTimestamp raw: String) -> String {
+        guard let nanos = Int64(raw) else { return raw }
+        let seconds = Double(nanos) / 1_000_000_000
+        return rfc3339Formatter.string(from: Date(timeIntervalSince1970: seconds))
     }
 }

@@ -228,6 +228,205 @@ class ObjectStoreTests: XCTestCase {
         }
     }
 
+    // MARK: - updateMeta
+
+    func testUpdateMetaChangesDescriptionAndMetadata() async throws {
+        let (client, ctx) = try await connectedContext()
+        defer { Task { try? await client.close() } }
+
+        let obs = try await ctx.createObjectStore(cfg: ObjectStoreConfig(bucket: "updmeta"))
+        let put = try await obs.put("k", data: Data("value".utf8))
+
+        var meta = ObjectMeta(name: "k")
+        meta.description = "now described"
+        meta.metadata = ["team": "core"]
+        try await obs.updateMeta("k", meta: meta)
+
+        let fetched = try await obs.getInfo("k")
+        XCTAssertEqual(fetched.description, "now described")
+        XCTAssertEqual(fetched.metadata?["team"], "core")
+        // Identity is preserved: nuid and size are untouched by a meta update.
+        XCTAssertEqual(fetched.nuid, put.nuid)
+        XCTAssertEqual(fetched.size, UInt64(Data("value".utf8).count))
+        XCTAssertEqual(fetched.digest, put.digest)
+
+        // The object contents still read back correctly.
+        let bytes = try await obs.getBytes("k")
+        XCTAssertEqual(bytes, Data("value".utf8))
+    }
+
+    func testUpdateMetaRenameMovesTheObject() async throws {
+        let (client, ctx) = try await connectedContext()
+        defer { Task { try? await client.close() } }
+
+        let obs = try await ctx.createObjectStore(cfg: ObjectStoreConfig(bucket: "rename"))
+        let put = try await obs.put("old", data: Data("payload".utf8))
+
+        try await obs.updateMeta("old", meta: ObjectMeta(name: "new"))
+
+        // The old name is gone.
+        do {
+            _ = try await obs.getInfo("old")
+            XCTFail("expected objectNotFound for the old name")
+        } catch JetStreamError.ObjectStoreError.objectNotFound {
+            // success
+        }
+
+        // The new name resolves and its contents are intact.
+        let fetched = try await obs.getInfo("new")
+        XCTAssertEqual(fetched.name, "new")
+        XCTAssertEqual(fetched.nuid, put.nuid)
+        let renamedBytes = try await obs.getBytes("new")
+        XCTAssertEqual(renamedBytes, Data("payload".utf8))
+    }
+
+    func testUpdateMetaRenameOntoExistingThrows() async throws {
+        let (client, ctx) = try await connectedContext()
+        defer { Task { try? await client.close() } }
+
+        let obs = try await ctx.createObjectStore(cfg: ObjectStoreConfig(bucket: "renameclash"))
+        _ = try await obs.put("a", data: Data("va".utf8))
+        _ = try await obs.put("b", data: Data("vb".utf8))
+
+        do {
+            try await obs.updateMeta("a", meta: ObjectMeta(name: "b"))
+            XCTFail("expected objectAlreadyExists")
+        } catch JetStreamError.ObjectStoreError.objectAlreadyExists {
+            // success
+        }
+    }
+
+    func testUpdateMetaOnDeletedThrows() async throws {
+        let (client, ctx) = try await connectedContext()
+        defer { Task { try? await client.close() } }
+
+        let obs = try await ctx.createObjectStore(cfg: ObjectStoreConfig(bucket: "updmetadel"))
+        _ = try await obs.put("k", data: Data("v".utf8))
+        try await obs.delete("k")
+
+        do {
+            try await obs.updateMeta("k", meta: ObjectMeta(name: "k2"))
+            XCTFail("expected updateMetaDeleted")
+        } catch JetStreamError.ObjectStoreError.updateMetaDeleted {
+            // success
+        }
+    }
+
+    // MARK: - links
+
+    func testAddLinkAndGetInfoReturnsLink() async throws {
+        let (client, ctx) = try await connectedContext()
+        defer { Task { try? await client.close() } }
+
+        let obs = try await ctx.createObjectStore(cfg: ObjectStoreConfig(bucket: "links"))
+        let target = try await obs.put("target", data: Data("payload".utf8))
+
+        let link = try await obs.addLink("alias", to: target)
+        XCTAssertEqual(link.name, "alias")
+        XCTAssertEqual(link.options?.link?.bucket, "links")
+        XCTAssertEqual(link.options?.link?.name, "target")
+        XCTAssertFalse(link.nuid.isEmpty)
+
+        // getInfo returns the link's meta with the link populated.
+        let fetched = try await obs.getInfo("alias")
+        XCTAssertEqual(fetched.options?.link?.bucket, "links")
+        XCTAssertEqual(fetched.options?.link?.name, "target")
+    }
+
+    func testAddLinkRejectsDeletedLinkAndOverwrite() async throws {
+        let (client, ctx) = try await connectedContext()
+        defer { Task { try? await client.close() } }
+
+        let obs = try await ctx.createObjectStore(cfg: ObjectStoreConfig(bucket: "linkreject"))
+        let target = try await obs.put("target", data: Data("payload".utf8))
+
+        // Link to a deleted object is rejected.
+        var deletedTarget = try await obs.put("gone", data: Data("x".utf8))
+        try await obs.delete("gone")
+        deletedTarget = try await obs.getInfo("gone", showDeleted: true)
+        do {
+            _ = try await obs.addLink("l1", to: deletedTarget)
+            XCTFail("expected noLinkToDeleted")
+        } catch JetStreamError.ObjectStoreError.noLinkToDeleted {
+            // success
+        }
+
+        // Link to a link is rejected.
+        let link = try await obs.addLink("alias", to: target)
+        do {
+            _ = try await obs.addLink("l2", to: link)
+            XCTFail("expected noLinkToLink")
+        } catch JetStreamError.ObjectStoreError.noLinkToLink {
+            // success
+        }
+
+        // Overwriting a live non-link object with a link is rejected.
+        do {
+            _ = try await obs.addLink("target", to: target)
+            XCTFail("expected objectAlreadyExists")
+        } catch JetStreamError.ObjectStoreError.objectAlreadyExists {
+            // success
+        }
+    }
+
+    func testAddBucketLink() async throws {
+        let (client, ctx) = try await connectedContext()
+        defer { Task { try? await client.close() } }
+
+        let a = try await ctx.createObjectStore(cfg: ObjectStoreConfig(bucket: "srcbucket"))
+        let b = try await ctx.createObjectStore(cfg: ObjectStoreConfig(bucket: "dstbucket"))
+
+        let link = try await a.addBucketLink("dirlink", to: b)
+        XCTAssertEqual(link.options?.link?.bucket, "dstbucket")
+        // A whole-store link carries no object name.
+        XCTAssertNil(link.options?.link?.name)
+
+        let fetched = try await a.getInfo("dirlink")
+        XCTAssertEqual(fetched.options?.link?.bucket, "dstbucket")
+        XCTAssertNil(fetched.options?.link?.name)
+    }
+
+    // MARK: - seal / status
+
+    func testSealPreventsFurtherWrites() async throws {
+        let (client, ctx) = try await connectedContext()
+        defer { Task { try? await client.close() } }
+
+        let obs = try await ctx.createObjectStore(cfg: ObjectStoreConfig(bucket: "sealed"))
+        _ = try await obs.put("k", data: Data("v".utf8))
+
+        try await obs.seal()
+
+        let sealedStatus = try await obs.status()
+        XCTAssertTrue(sealedStatus.sealed)
+
+        do {
+            _ = try await obs.put("k2", data: Data("v2".utf8))
+            XCTFail("expected the put to fail on a sealed store")
+        } catch {
+            // Expected: a sealed stream rejects publishes.
+        }
+    }
+
+    func testStatusReflectsConfig() async throws {
+        let (client, ctx) = try await connectedContext()
+        defer { Task { try? await client.close() } }
+
+        var cfg = ObjectStoreConfig(bucket: "statusbucket")
+        cfg.description = "a described bucket"
+        cfg.ttl = NanoTimeInterval(60)
+        let obs = try await ctx.createObjectStore(cfg: cfg)
+        _ = try await obs.put("k", data: Data("some-bytes".utf8))
+
+        let status = try await obs.status()
+        XCTAssertEqual(status.bucket, "statusbucket")
+        XCTAssertEqual(status.description, "a described bucket")
+        XCTAssertEqual(status.ttl, NanoTimeInterval(60))
+        XCTAssertFalse(status.sealed)
+        XCTAssertEqual(status.backingStore, "JetStream")
+        XCTAssertGreaterThan(status.size, 0)
+    }
+
     // MARK: - Wire interop with the `nats` CLI
 
     /// Proves object-store wire compatibility in both directions, exercising the

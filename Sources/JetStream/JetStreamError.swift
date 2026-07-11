@@ -432,6 +432,12 @@ public enum JetStreamError {
         case nameRequired
         case linkNotAllowed
         case sealed
+        case noObjectsFound
+        case objectAlreadyExists
+        case objectRequired
+        case noLinkToDeleted
+        case noLinkToLink
+        case updateMetaDeleted
         case notImplemented(String)
 
         public var description: String {
@@ -454,6 +460,18 @@ public enum JetStreamError {
                 return "nats: link cannot be set when putting the object in bucket"
             case .sealed:
                 return "nats: object-store is sealed"
+            case .noObjectsFound:
+                return "nats: no objects found"
+            case .objectAlreadyExists:
+                return "nats: an object already exists with that name"
+            case .objectRequired:
+                return "nats: object required"
+            case .noLinkToDeleted:
+                return "nats: not allowed to link to a deleted object"
+            case .noLinkToLink:
+                return "nats: not allowed to link to another link"
+            case .updateMetaDeleted:
+                return "nats: cannot update meta for a deleted object"
             case .notImplemented(let feature):
                 return "nats: not implemented: \(feature)"
             }
