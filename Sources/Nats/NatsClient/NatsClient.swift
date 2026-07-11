@@ -35,6 +35,7 @@ public struct Auth: Sendable {
     var password: String?
     var token: String?
     var credentialsPath: URL?
+    var credentialsContents: String?
     var nkeyPath: URL?
     var nkey: String?
 
@@ -52,6 +53,11 @@ public struct Auth: Sendable {
     static func fromCredentials(_ credentials: URL) -> Auth {
         var auth = Auth()
         auth.credentialsPath = credentials
+        return auth
+    }
+    static func fromCredentialsContents(_ contents: String) -> Auth {
+        var auth = Auth()
+        auth.credentialsContents = contents
         return auth
     }
     static func fromNkey(_ nkey: URL) -> Auth {

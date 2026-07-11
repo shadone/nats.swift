@@ -24,6 +24,7 @@ public class NatsClientOptions {
     private var maxReconnects: Int?
     private var initialReconnect = false
     private var noRandomize = false
+    private var ignoreDiscovered = false
     private var auth: Auth? = nil
     private var withTls = false
     private var tlsFirst = false
@@ -114,6 +115,19 @@ public class NatsClientOptions {
         return self
     }
 
+    /// The contents of a credentials file (user JWT and Nkey seed) provided inline.
+    /// Use this instead of ``NatsClientOptions/credentialsFile(_:)`` when the credentials
+    /// are held in memory rather than on disk.
+    /// If both are set, the inline contents take precedence.
+    public func credentials(_ credentials: String) -> NatsClientOptions {
+        if self.auth == nil {
+            self.auth = Auth.fromCredentialsContents(credentials)
+        } else {
+            self.auth?.credentialsContents = credentials
+        }
+        return self
+    }
+
     /// The location of a public nkey file.
     /// This and ``NatsClientOptions/nkey(_:)`` are mutually exclusive.
     public func nkeyFile(_ nkey: URL) -> NatsClientOptions {
@@ -170,6 +184,15 @@ public class NatsClientOptions {
         return self
     }
 
+    /// Instructs the client to ignore server addresses gossiped via the `connect_urls`
+    /// field of server INFO messages. Only the URLs explicitly provided in
+    /// ``NatsClientOptions/urls(_:)`` or ``NatsClientOptions/url(_:)`` will be used for
+    /// connecting and reconnecting.
+    public func ignoreDiscoveredServers() -> NatsClientOptions {
+        self.ignoreDiscovered = true
+        return self
+    }
+
     /// By default, ``NatsClient/connect()`` will return an error if
     /// the connection to the server cannot be established.
     ///
@@ -188,6 +211,7 @@ public class NatsClientOptions {
             reconnectWait: reconnectWait,
             maxReconnects: maxReconnects,
             retainServersOrder: noRandomize,
+            ignoreDiscoveredServers: ignoreDiscovered,
             pingInterval: pingInterval,
             auth: auth,
             requireTls: withTls,

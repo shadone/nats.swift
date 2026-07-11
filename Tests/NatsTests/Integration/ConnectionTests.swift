@@ -38,6 +38,7 @@ class CoreNatsTests: XCTestCase {
         ("testUsernameAndPassword", testUsernameAndPassword),
         ("testTokenAuth", testTokenAuth),
         ("testCredentialsAuth", testCredentialsAuth),
+        ("testCredentialsContentsAuth", testCredentialsContentsAuth),
         ("testNkeyAuth", testNkeyAuth),
         ("testNkeyAuthFile", testNkeyAuthFile),
         ("testMutualTls", testMutualTls),
@@ -583,6 +584,25 @@ class CoreNatsTests: XCTestCase {
 
         let client = NatsClientOptions().url(URL(string: natsServer.clientURL)!).credentialsFile(
             creds
+        ).build()
+        try await client.connect()
+        let subscribe = try await client.subscribe(subject: "foo").makeAsyncIterator()
+        try await client.publish("data".data(using: .utf8)!, subject: "foo")
+        _ = try await subscribe.next()
+    }
+
+    func testCredentialsContentsAuth() async throws {
+        logger.logLevel = .critical
+        let bundle = Bundle.module
+        natsServer.start(cfg: bundle.url(forResource: "jwt", withExtension: "conf")!.relativePath)
+
+        // Read the .creds file's contents in the test and pass them inline, proving
+        // auth succeeds with no temporary credentials file on disk.
+        let creds = bundle.url(forResource: "TestUser", withExtension: "creds")!
+        let credsContents = try String(contentsOf: creds, encoding: .utf8)
+
+        let client = NatsClientOptions().url(URL(string: natsServer.clientURL)!).credentials(
+            credsContents
         ).build()
         try await client.connect()
         let subscribe = try await client.subscribe(subject: "foo").makeAsyncIterator()

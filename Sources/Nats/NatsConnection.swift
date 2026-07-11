@@ -48,10 +48,13 @@ final class ConnectionHandler: ChannelInboundHandler, Sendable {
         get { _urls.withLockedValue { $0 } }
         set { _urls.withLockedValue { $0 = newValue } }
     }
+    /// The current reconnect server pool, including any discovered servers. Exposed for testing.
+    internal var serverPool: [URL] { self.urls }
     // nanoseconds representation of TimeInterval
     private let reconnectWait: UInt64
     private let maxReconnects: Int?
     private let retainServersOrder: Bool
+    private let ignoreDiscoveredServers: Bool
     private let pingInterval: TimeInterval
     private let requireTls: Bool
     private let tlsFirst: Bool
@@ -117,7 +120,7 @@ final class ConnectionHandler: ChannelInboundHandler, Sendable {
 
     init(
         urls: [URL], reconnectWait: TimeInterval, maxReconnects: Int?,
-        retainServersOrder: Bool,
+        retainServersOrder: Bool, ignoreDiscoveredServers: Bool,
         pingInterval: TimeInterval, auth: Auth?, requireTls: Bool, tlsFirst: Bool,
         clientCertificate: URL?, clientKey: URL?,
         rootCertificate: URL?, retryOnFailedConnect: Bool
@@ -128,6 +131,7 @@ final class ConnectionHandler: ChannelInboundHandler, Sendable {
         self.reconnectWait = UInt64(reconnectWait * 1_000_000_000)
         self.maxReconnects = maxReconnects
         self.retainServersOrder = retainServersOrder
+        self.ignoreDiscoveredServers = ignoreDiscoveredServers
         self.auth = auth
         self.pingInterval = pingInterval
         self.requireTls = requireTls
@@ -539,7 +543,31 @@ final class ConnectionHandler: ChannelInboundHandler, Sendable {
         if self.auth?.nkey != nil && self.auth?.nkeyPath != nil {
             throw NatsError.ConnectError.invalidConfig("cannot use both nkey and nkeyPath")
         }
-        if let auth = self.auth, let credentialsPath = auth.credentialsPath {
+        if let auth = self.auth, let credentialsContents = auth.credentialsContents {
+            // Inline credentials take precedence over a credentials file.
+            // Parse the user JWT and NKey seed directly from the in-memory string,
+            // avoiding any filesystem access. The nonce-signing tail below MUST
+            // stay identical to the credentials-file branch that follows; the only
+            // intended difference between the two paths is the source of the
+            // credentials (in-memory string vs. file contents).
+            guard let jwt = JwtUtils.parseDecoratedJWT(contents: credentialsContents) else {
+                throw NatsError.ConnectError.invalidConfig(
+                    "failed to extract JWT from credentials contents")
+            }
+            guard let nkey = JwtUtils.parseDecoratedNKey(contents: credentialsContents) else {
+                throw NatsError.ConnectError.invalidConfig(
+                    "failed to extract NKEY from credentials contents")
+            }
+            guard let nonce = self.serverInfo?.nonce else {
+                throw NatsError.ConnectError.invalidConfig("missing nonce")
+            }
+            let keypair = try KeyPair(seed: nkey)
+            let nonceData = nonce.data(using: .utf8)!
+            let sig = try keypair.sign(input: nonceData)
+            let base64sig = sig.base64EncodedURLSafeNotPadded()
+            initialConnect.signature = base64sig
+            initialConnect.userJwt = jwt
+        } else if let auth = self.auth, let credentialsPath = auth.credentialsPath {
             let credentials = try await URLSession.shared.data(from: credentialsPath).0
             guard let jwt = JwtUtils.parseDecoratedJWT(contents: credentials) else {
                 throw NatsError.ConnectError.invalidConfig(
@@ -757,7 +785,8 @@ final class ConnectionHandler: ChannelInboundHandler, Sendable {
         return (bootstrap, upgradePromise)
     }
 
-    private func updateServersList(info: ServerInfo) {
+    internal func updateServersList(info: ServerInfo) {
+        guard !ignoreDiscoveredServers else { return }
         if let connectUrls = info.connectUrls {
             for connectUrl in connectUrls {
                 guard let url = URL(string: connectUrl) else {
