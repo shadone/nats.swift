@@ -53,7 +53,7 @@ final class OrderedConsumerTests: XCTestCase {
         let watchdog = watchdog(for: oc, after: 20)
         defer { watchdog.cancel() }
 
-        var iterator = oc.messages.makeAsyncIterator()
+        var iterator = oc.natsMessages.makeAsyncIterator()
         var seqs: [UInt64] = []
 
         // Read the first 5 messages (stream seqs 1...5).
@@ -108,7 +108,7 @@ final class OrderedConsumerTests: XCTestCase {
         let watchdog = watchdog(for: oc, after: 30)
         defer { watchdog.cancel() }
 
-        var iterator = oc.messages.makeAsyncIterator()
+        var iterator = oc.natsMessages.makeAsyncIterator()
         var seqs: [UInt64] = []
         for _ in 0..<total {
             let next = try await iterator.next()
@@ -185,7 +185,7 @@ final class OrderedConsumerTests: XCTestCase {
         try await waitForConsumer(oc: oc, timeout: 10)
         try await client.close()
 
-        var iterator = oc.messages.makeAsyncIterator()
+        var iterator = oc.natsMessages.makeAsyncIterator()
         do {
             // No messages were published; the stream must finish by THROWING, not return nil.
             while try await iterator.next() != nil {}

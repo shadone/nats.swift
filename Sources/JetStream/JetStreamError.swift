@@ -128,6 +128,20 @@ public enum JetStreamError {
         }
     }
 
+    public enum PushConsumerError: JetStreamErrorProtocol {
+        case consumerNotFound(String)
+        case notPushConsumer(String)
+
+        public var description: String {
+            switch self {
+            case .consumerNotFound(let name):
+                return "nats: consumer '\(name)' not found"
+            case .notPushConsumer(let name):
+                return "nats: consumer '\(name)' is not a push consumer (no deliver subject)"
+            }
+        }
+    }
+
     public enum StreamError: JetStreamErrorProtocol {
         case nameRequired
         case invalidStreamName(String)

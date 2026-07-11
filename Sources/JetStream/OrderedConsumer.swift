@@ -60,27 +60,38 @@ internal struct OrderedConsumerCursor: Equatable {
 ///
 /// ## Concurrency model
 /// An `actor` owns all mutable state; exactly one long-lived pump ``Task`` drives the deliver-inbox
-/// subscription (via ``PushConsumer``) and calls back into the actor to mutate state and emit
+/// subscription (via ``PushDelivery``) and calls back into the actor to mutate state and emit
 /// output. Output flows through an `AsyncThrowingStream`. This eliminates data races by type, gives
 /// a single cancellation path, and reuses the repo's `nextWithTimeout` race idiom for missed
 /// heartbeats.
-internal actor OrderedConsumer {
+public actor OrderedConsumer {
     // MARK: Immutable configuration
 
-    private let ctx: JetStreamContext
-    private let streamName: String
+    internal let ctx: JetStreamContext
+    internal let streamName: String
     private let filterSubject: String?
+    private let filterSubjects: [String]?
     private let initialDeliverPolicy: DeliverPolicy
     private let initialOptStartSeq: UInt64?
+    private let initialOptStartTime: String?
+    private let replayPolicy: ReplayPolicy
     private let headersOnly: Bool
     private let inactiveThreshold: NanoTimeInterval
+    private let metadata: [String: String]?
+    private let maxResetAttempts: Int
     private let namePrefix: String
     private let idleHeartbeatSeconds: TimeInterval
 
+    /// Nonisolated, thread-safe state read/written from both the actor and the nonisolated
+    /// ``MessageConsuming`` methods: the latest ``ConsumerInfo`` (for ``cachedInfo``) and the single
+    /// shared delivery ``MessageStream`` that all consumption methods drive.
+    internal nonisolated let shared = OrderedSharedState()
+
     // MARK: Output
 
-    /// The ordered stream of delivered messages. Iterate this after calling ``start()``.
-    internal nonisolated let messages: AsyncThrowingStream<NatsMessage, Error>
+    /// The ordered stream of delivered raw messages, driven by the reset engine. Internal; the
+    /// public surface (``consume(_:onError:)`` / ``messages()`` / ``next(timeout:)``) wraps it.
+    internal nonisolated let natsMessages: AsyncThrowingStream<NatsMessage, Error>
     private let continuation: AsyncThrowingStream<NatsMessage, Error>.Continuation
 
     // MARK: Mutable state (actor-isolated)
@@ -96,7 +107,7 @@ internal actor OrderedConsumer {
     private var closed = false
     private var disconnected = false
     private var currentSub: NatsSubscription?
-    private var currentName: String?
+    internal var currentName: String?
     private var pumpTask: Task<Void, Never>?
     private var connListenerId: String?
 
@@ -104,26 +115,72 @@ internal actor OrderedConsumer {
         ctx: JetStreamContext,
         streamName: String,
         filterSubject: String? = nil,
+        filterSubjects: [String]? = nil,
         deliverPolicy: DeliverPolicy = .all,
         optStartSeq: UInt64? = nil,
+        optStartTime: String? = nil,
+        replayPolicy: ReplayPolicy = .instant,
         headersOnly: Bool = false,
         inactiveThreshold: NanoTimeInterval = NanoTimeInterval(5 * 60),
+        metadata: [String: String]? = nil,
+        maxResetAttempts: Int = -1,
         namePrefix: String? = nil,
         idleHeartbeat: TimeInterval = 5
     ) {
         self.ctx = ctx
         self.streamName = streamName
         self.filterSubject = filterSubject
+        self.filterSubjects = filterSubjects
         self.initialDeliverPolicy = deliverPolicy
         self.initialOptStartSeq = optStartSeq
+        self.initialOptStartTime = optStartTime
+        self.replayPolicy = replayPolicy
         self.headersOnly = headersOnly
         self.inactiveThreshold = inactiveThreshold
+        self.metadata = metadata
+        self.maxResetAttempts = maxResetAttempts
         self.namePrefix = namePrefix ?? "ord\(nextNuid())"
         self.idleHeartbeatSeconds = idleHeartbeat
         let (stream, continuation) = AsyncThrowingStream.makeStream(
             of: NatsMessage.self, throwing: Error.self)
-        self.messages = stream
+        self.natsMessages = stream
         self.continuation = continuation
+    }
+
+    /// Creates an ordered consumer from a public ``OrderedConsumerConfig``.
+    ///
+    /// A single filter subject maps to a single-subject filter; multiple filter subjects use the
+    /// multi-subject form. The push wire fields are set by the library (see ``OrderedConsumerConfig``).
+    ///
+    /// - Parameters:
+    ///   - ctx: the JetStream context.
+    ///   - streamName: the stream to consume from.
+    ///   - config: the ordered-consumer configuration.
+    ///   - idleHeartbeat: the idle heartbeat / reset-detection interval, in seconds.
+    internal init(
+        ctx: JetStreamContext,
+        streamName: String,
+        config: OrderedConsumerConfig,
+        idleHeartbeat: TimeInterval = 5
+    ) {
+        let filters = config.filterSubjects
+        let single = (filters?.count == 1) ? filters?.first : nil
+        let multiple = (filters?.count ?? 0) > 1 ? filters : nil
+        self.init(
+            ctx: ctx,
+            streamName: streamName,
+            filterSubject: single,
+            filterSubjects: multiple,
+            deliverPolicy: config.deliverPolicy,
+            optStartSeq: config.optStartSeq,
+            optStartTime: config.optStartTime,
+            replayPolicy: config.replayPolicy,
+            headersOnly: config.headersOnly,
+            inactiveThreshold: config.inactiveThreshold ?? NanoTimeInterval(5 * 60),
+            metadata: config.metadata,
+            maxResetAttempts: config.maxResetAttempts,
+            namePrefix: config.namePrefix,
+            idleHeartbeat: idleHeartbeat)
     }
 
     // MARK: Lifecycle
@@ -291,13 +348,13 @@ internal actor OrderedConsumer {
                 break
             }
             let generationSerial = serial
-            let push = PushConsumer(
+            let push = PushDelivery(
                 client: ctx.client, subscription: sub,
                 idleHeartbeatSeconds: idleHeartbeatSeconds)
             var needsReset = false
 
             reading: while !closed {
-                let event: PushConsumer.Event
+                let event: PushDelivery.Event
                 do {
                     event = try await push.next()
                 } catch {
@@ -345,9 +402,9 @@ internal actor OrderedConsumer {
             }
             if needsReset {
                 do {
-                    try await recreate()
+                    try await recreate(maxAttempts: resetMaxAttempts)
                 } catch {
-                    break  // closed during backoff
+                    break  // closed during backoff or reset attempts exhausted
                 }
             } else {
                 break
@@ -395,16 +452,24 @@ internal actor OrderedConsumer {
         }
     }
 
+    /// The per-reset create attempt cap: `nil` (unlimited) when ``maxResetAttempts`` is negative.
+    private var resetMaxAttempts: Int? {
+        maxResetAttempts < 0 ? nil : maxResetAttempts
+    }
+
     private func buildConfig(deliverSubject: String) -> ConsumerConfig {
         var cfg = ConsumerConfig(
             name: "\(namePrefix)_\(serial)",
             deliverPolicy: .byStartSequence,
             ackPolicy: .none,
             filterSubject: filterSubject,
+            filterSubjects: filterSubjects,
+            replayPolicy: replayPolicy,
             headersOnly: headersOnly ? true : nil,
             inactiveThreshold: inactiveThreshold,
             replicas: OrderedConsumer.recreateReplicas,
             memoryStorage: true,
+            metadata: metadata,
             deliverSubject: deliverSubject,
             flowControl: true,
             idleHeartbeat: NanoTimeInterval(idleHeartbeatSeconds)
@@ -416,6 +481,8 @@ internal actor OrderedConsumer {
             switch initialDeliverPolicy {
             case .byStartSequence:
                 cfg.optStartSeq = initialOptStartSeq
+            case .byStartTime:
+                cfg.optStartTime = initialOptStartTime
             default:
                 cfg.optStartSeq = nil
             }
@@ -493,6 +560,7 @@ extension OrderedConsumer {
 
                 currentSub = sub
                 currentName = consumer.info.name
+                shared.setInfo(consumer.info)
                 if initialNumPending == nil {
                     initialNumPending = consumer.info.numPending
                 }

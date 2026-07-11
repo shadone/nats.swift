@@ -237,7 +237,7 @@ public final class KeyValueWatcher: AsyncSequence {
         }
 
         do {
-            for try await message in consumer.messages {
+            for try await message in consumer.natsMessages {
                 guard
                     let meta = try? JetStreamMessage(message: message, client: client).metadata()
                 else {

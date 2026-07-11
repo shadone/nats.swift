@@ -74,6 +74,11 @@ public class FetchResult: AsyncSequence {
             sub: self.sub, idleHeartbeat: self.idleHeartbeat, remainingMessages: self.batch)
     }
 
+    /// Tears down the underlying reply subscription. Used to promptly stop a continuous pull loop.
+    internal func cancel() async {
+        try? await sub.unsubscribe()
+    }
+
     public struct FetchIterator: AsyncIteratorProtocol {
         private let ctx: JetStreamContext
         private let sub: NatsSubscription

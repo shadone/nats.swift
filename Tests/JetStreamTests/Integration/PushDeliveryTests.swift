@@ -17,7 +17,7 @@ import XCTest
 @testable import JetStream
 @testable import Nats
 
-final class PushConsumerTests: XCTestCase {
+final class PushDeliveryTests: XCTestCase {
 
     var natsServer = NatsServer()
 
@@ -26,7 +26,7 @@ final class PushConsumerTests: XCTestCase {
         natsServer.stop()
     }
 
-    /// Deterministic flow-control reply: hand the ``PushConsumer`` a synthetic FC control message
+    /// Deterministic flow-control reply: hand the ``PushDelivery`` a synthetic FC control message
     /// (Status 100, Description "FlowControl Request", empty body, a reply subject) and assert it
     /// publishes an empty message to that reply subject. No real consumer or server timing involved.
     func testFlowControlReply() async throws {
@@ -46,7 +46,7 @@ final class PushConsumerTests: XCTestCase {
         let replySubject = client.newInbox()
         let replySub = try await client.subscribe(subject: replySubject)
 
-        let push = PushConsumer(
+        let push = PushDelivery(
             client: client, subscription: deliverSub, idleHeartbeatSeconds: 0)
 
         // Synthetic FC control message. NatsMessage's memberwise init is reachable via @testable.
