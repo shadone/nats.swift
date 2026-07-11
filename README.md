@@ -18,7 +18,45 @@ messaging, enabling swift and efficient communication across distributed systems
 
 Currently, the client supports **Core NATS** with auth, TLS, lame duck mode and more.
 
-JetStream, KV, Object Store, Service API are on the roadmap.
+**On the `firstclass-kv` branch** (an experiment bringing the client toward
+`nats.go`/`async-nats` parity — see [FIRSTCLASS.md](./FIRSTCLASS.md)):
+
+- **JetStream KeyValue** — buckets, get/put/create/update/delete/purge with
+  optimistic concurrency, status, and hang-safe `watch`/`watchAll`/`keys`/
+  `history`/`purgeDeletes`.
+- **Ordered push consumer** — server-driven delivery with flow control, idle
+  heartbeats, and automatic reset/recreate on gaps or disconnects (no message
+  loss or duplication across a reset).
+- **Modern consumer API** — `consume`/`messages`/`next` across pull, push and
+  ordered consumers.
+- **Connection ergonomics** — inline credentials (no temp file),
+  `ignoreDiscoveredServers()`, `waitForConnected()`, `state`/`isConnected`,
+  `unlimitedReconnects()`.
+
+Object Store and the Service API remain on the roadmap.
+
+### JetStream KeyValue quick look
+
+```swift
+import Nats
+import JetStream
+
+let nats = NatsClientOptions().url(URL(string: "nats://localhost:4222")!).build()
+try await nats.connect()
+
+let js = JetStreamContext(client: nats)
+let kv = try await js.createKeyValue(cfg: KeyValueConfig(bucket: "config"))
+
+let rev = try await kv.put("greeting", "hello".data(using: .utf8)!)
+let entry = try await kv.get("greeting")           // entry?.value == "hello"
+
+// Watch: initial values, then a nil end-of-initial marker, then live updates.
+let watcher = try await kv.watchAll()
+for try await update in watcher {
+    guard let entry = update else { continue }      // nil == end of initial values
+    print("\(entry.key) = \(String(data: entry.value, encoding: .utf8) ?? "") @\(entry.revision)")
+}
+```
 
 ## Support
 
