@@ -21,6 +21,7 @@ let allScenarioNames: [String] = [
     "jsPublish",
     "kvPutGet",
     "objPutGet",
+    "pullConsume",
     "orderedConsume",
     "pushConsume",
     "pushConsumeHB",

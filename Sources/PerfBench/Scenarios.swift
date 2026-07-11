@@ -34,6 +34,7 @@ func runScenario(
     case "jsPublish": return try await runJsPublish(nats: nats, js: js, config: config)
     case "kvPutGet": return try await runKvPutGet(js: js, config: config)
     case "objPutGet": return try await runObjPutGet(js: js, config: config)
+    case "pullConsume": return try await runPullConsume(nats: nats, js: js, config: config)
     case "orderedConsume": return try await runOrderedConsume(nats: nats, js: js, config: config)
     case "pushConsume": return try await runPushConsume(nats: nats, js: js, config: config)
     case "pushConsumeHB":
@@ -275,6 +276,36 @@ func runObjPutGet(js: JetStreamContext, config: Config) async throws -> Scenario
     } cleanup: {
         try? await js.deleteObjectStore(bucket: bucket)
     }
+}
+
+// MARK: - Pull consume
+
+/// Ephemeral ack-none PULL consumer driven by the sequential fetch-batch loop. Isolates the pull
+/// delivery path's throughput (the batch-gap the overlapping-pull optimization would target) from
+/// ack cost.
+func runPullConsume(
+    nats: NatsClient, js: JetStreamContext, config: Config
+) async throws -> ScenarioResult {
+    let count = jetStreamCount(config)
+    let start: @Sendable (JetStreamContext, String, DeliveryTimer) async throws -> ConsumeContext =
+        {
+            context, stream, timer in
+            let consumer = try await context.createConsumer(
+                stream: stream, cfg: ConsumerConfig(ackPolicy: .none))
+            return try consumer.consume { _ in timer.record() }
+        }
+
+    _ = try await deliverCycle(
+        nats: nats, js: js, count: warmupCount(count), size: config.size, kind: "pull",
+        startConsumer: start)
+    let elapsed = try await deliverCycle(
+        nats: nats, js: js, count: count, size: config.size, kind: "pull", startConsumer: start)
+
+    let secs = seconds(fromNanos: elapsed)
+    return ScenarioResult(
+        name: "pullConsume", count: count, payloadSize: config.size,
+        elapsedMs: millis(fromNanos: elapsed),
+        metrics: [Metric(label: "msgs/sec", value: Double(count) / secs)])
 }
 
 // MARK: - Ordered consume
