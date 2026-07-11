@@ -18,15 +18,11 @@ import Nats
 /// It exposes message properties (payload, headers etc.) and various methods for acknowledging delivery.
 /// It also allows for checking message metadata.
 ///
-/// `@unchecked Sendable`: the struct is deeply immutable (every stored property is a `let`), its
-/// `message` is a `Sendable` `NatsMessage`, and its only non-`Sendable` member is the `client`
-/// reference. `NatsClient` is a pre-existing core type that is not yet formally `Sendable`, but it is
-/// effectively thread-safe — every operation it exposes (here only `publish`, used by `ack`) is
-/// serialized through the connection handler's NIO-locked / atomic state — so sharing a message
-/// across concurrency domains and acking it is data-race-free. This conformance is what lets a
-/// message flow through the `@Sendable` ``MessageHandler``, the mailbox actor and the delivery task
-/// groups, all of which already assume it. It becomes a checked `Sendable` once `NatsClient` is.
-public struct JetStreamMessage: @unchecked Sendable {
+/// `Sendable` (checked): the struct is deeply immutable (every stored property is a `let`), its
+/// `message` is a `Sendable` `NatsMessage`, and its `client` is a `Sendable` ``NatsClient``. This is
+/// what lets a message flow through the `@Sendable` ``MessageHandler``, the mailbox actor and the
+/// delivery task groups, all of which already assume it.
+public struct JetStreamMessage: Sendable {
     private let message: NatsMessage
 
     /// Message payload.

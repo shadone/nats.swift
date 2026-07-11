@@ -17,7 +17,7 @@ import Nuid
 
 public class Consumer {
 
-    private static var rdigits: [UInt8] = Array(
+    private static let rdigits: [UInt8] = Array(
         "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".utf8)
 
     /// Contains information about the consumer.

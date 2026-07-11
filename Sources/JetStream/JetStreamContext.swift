@@ -17,10 +17,21 @@ import Nats
 import Nuid
 
 /// A context which can perform jetstream scoped requests.
-public class JetStreamContext {
-    internal var client: NatsClient
-    private var prefix: String = "$JS.API"
-    private var timeout: TimeInterval = 5.0
+///
+/// `@unchecked Sendable`: `client` (a `Sendable` ``NatsClient``) and `prefix` are immutable `let`s;
+/// the only mutable state is `timeout`, which the public ``setTimeout(_:)`` can change after
+/// construction. That single field is guarded by `timeoutLock`, so every read and write is
+/// serialized and sharing a context across concurrency domains is data-race-free. The lock is held
+/// only across the synchronous property access (never across an `await`), matching the JetStream
+/// target's existing `NSLock` synchronization idiom.
+public final class JetStreamContext: @unchecked Sendable {
+    internal let client: NatsClient
+    private let prefix: String
+    private let timeoutLock = NSLock()
+    private var _timeout: TimeInterval
+    private var timeout: TimeInterval {
+        timeoutLock.withLockScoped { _timeout }
+    }
 
     /// Creates a JetStreamContext from ``NatsClient`` with optional custom prefix and timeout.
     ///
@@ -31,7 +42,7 @@ public class JetStreamContext {
     public init(client: NatsClient, prefix: String = "$JS.API", timeout: TimeInterval = 5.0) {
         self.client = client
         self.prefix = prefix
-        self.timeout = timeout
+        self._timeout = timeout
     }
 
     /// Creates a JetStreamContext from ``NatsClient`` with custom domain and timeout.
@@ -43,7 +54,7 @@ public class JetStreamContext {
     public init(client: NatsClient, domain: String, timeout: TimeInterval = 5.0) {
         self.client = client
         self.prefix = "$JS.\(domain).API"
-        self.timeout = timeout
+        self._timeout = timeout
     }
 
     /// Creates a JetStreamContext from ``NatsClient``
@@ -52,11 +63,13 @@ public class JetStreamContext {
     ///  - client: NATS client connection.
     public init(client: NatsClient) {
         self.client = client
+        self.prefix = "$JS.API"
+        self._timeout = 5.0
     }
 
     /// Sets a custom timeout for JetStream API requests.
     public func setTimeout(_ timeout: TimeInterval) {
-        self.timeout = timeout
+        timeoutLock.withLockScoped { _timeout = timeout }
     }
 }
 

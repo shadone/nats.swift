@@ -17,8 +17,8 @@ extension Data {
     private static let cr = UInt8(ascii: "\r")
     private static let lf = UInt8(ascii: "\n")
     private static let crlf = Data([cr, lf])
-    private static var currentNum = 0
-    private static var errored = false
+    private static let currentNum = 0
+    private static let errored = false
     internal static let versionLinePrefix = "NATS/1.0"
 
     func removePrefix(_ prefix: Data) -> Data {

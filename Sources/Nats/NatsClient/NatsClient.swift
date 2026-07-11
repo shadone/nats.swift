@@ -18,7 +18,11 @@ import NIO
 import NIOFoundationCompat
 import Nuid
 
-public var logger = Logger(label: "Nats")
+// `nonisolated(unsafe)`: a process-wide, user-configurable logger. It is written at most once
+// during setup (before any connection is shared across tasks) and only read thereafter, so the
+// unguarded global access is safe. `Logger` is itself a `Sendable` value type; keeping this a
+// `var` preserves the ability for consumers to swap in their own logger.
+nonisolated(unsafe) public var logger = Logger(label: "Nats")
 
 /// NatsClient connection states
 public enum NatsState: Sendable {
@@ -72,14 +76,31 @@ public struct Auth: Sendable {
     }
 }
 
-public class NatsClient {
+/// The main NATS client.
+///
+/// `Sendable` (checked): both stored properties are immutable `let`s. `connectionHandler` is a
+/// ``ConnectionHandler`` — itself `Sendable`, since all of its mutable state is guarded by
+/// `NIOLockedValueBox`/`ManagedAtomic` — and `inboxPrefix` is an immutable `String`. This makes
+/// the client safe to share across concurrency domains (JetStream contexts, services, actors)
+/// without a `@preconcurrency` import.
+public final class NatsClient: Sendable {
     public var connectedUrl: URL? {
         connectionHandler?.connectedUrl
     }
-    internal var connectionHandler: ConnectionHandler?
-    internal var inboxPrefix: String = "_INBOX."
+    internal let connectionHandler: ConnectionHandler?
+    internal let inboxPrefix: String
 
+    /// Creates an unconfigured client with no connection handler. Used internally by
+    /// ``NatsClientOptions/build()`` (which supplies the handler via the other initializer) and
+    /// by tests that need a placeholder client.
     internal init() {
+        self.connectionHandler = nil
+        self.inboxPrefix = "_INBOX."
+    }
+
+    internal init(inboxPrefix: String, connectionHandler: ConnectionHandler) {
+        self.inboxPrefix = inboxPrefix
+        self.connectionHandler = connectionHandler
     }
 
     /// Returns a new inbox subject using the configured prefix and a generated NUID.

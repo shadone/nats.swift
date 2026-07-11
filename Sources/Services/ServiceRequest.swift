@@ -14,7 +14,7 @@
 import Foundation
 import NIOConcurrencyHelpers
 
-@preconcurrency import Nats
+import Nats
 
 /// A request handler registered on a service endpoint.
 public typealias ServiceHandler = @Sendable (ServiceRequest) async -> Void

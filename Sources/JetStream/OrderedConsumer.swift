@@ -67,16 +67,11 @@ internal struct OrderedConsumerCursor: Equatable {
 public actor OrderedConsumer {
     // MARK: Immutable configuration
 
-    // `nonisolated(unsafe)` because the nonisolated ``MessageConsuming`` methods
-    // (`consume`/`messages`/`next`, required by the protocol to be synchronous) build their delivery
-    // source off `ctx.client` without hopping onto the actor. `ctx` is an immutable `let` assigned
-    // once in `init` and only ever read thereafter, and `JetStreamContext`/`NatsClient` are
-    // effectively thread-safe (the client serializes all I/O through NIO-locked / atomic state), so
-    // the unchecked cross-isolation read is sound. This is the actor-property analog of the
-    // `@unchecked Sendable` the delivery sources already rely on. `JetStreamContext` is a
-    // pre-existing, non-`Sendable` core type; a plain `nonisolated let` would require it to be
-    // `Sendable`, which is out of scope here.
-    internal nonisolated(unsafe) let ctx: JetStreamContext
+    // `nonisolated` so the nonisolated ``MessageConsuming`` methods (`consume`/`messages`/`next`,
+    // required by the protocol to be synchronous) can build their delivery source off `ctx.client`
+    // without hopping onto the actor. `JetStreamContext` is now `Sendable`, so this needs no
+    // `(unsafe)` escape hatch.
+    internal nonisolated let ctx: JetStreamContext
     internal let streamName: String
     private let filterSubject: String?
     private let filterSubjects: [String]?
