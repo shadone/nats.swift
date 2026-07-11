@@ -15,10 +15,10 @@ clients build it, as a real contribution to the library.
 
 ## What was delivered
 
-Twelve reviewed, tested, committed features. Every commit builds clean, passes
+Fifteen reviewed, tested, committed features. Every commit builds clean, passes
 against a real `nats-server` (v2.12.7), is `swift format`-clean, and was
 reviewed by an independent pass (correctness + Swift-6 concurrency) with
-findings fixed before commit. The final suite is **253 tests, 0 failures**.
+findings fixed before commit. The final suite is **280 tests, 0 failures**.
 
 | Commit | Feature |
 | --- | --- |
@@ -34,6 +34,9 @@ findings fixed before commit. The final suite is **253 tests, 0 failures**.
 | `a7e251f` | **Service (micro) API** — a new `Services` module |
 | `f155008` | **Swift-6 keystone** — the public API surface is now `Sendable` |
 | `a5a32ec` | **Swift 6 language mode** adopted library-wide (`swiftLanguageModes: [.v6]`) |
+| `ddacd92` | **Per-message TTL + KV per-key TTL** (NATS 2.11+) |
+| `60ec898` | **ObjectStore streaming put/get** |
+| `c5f8be1` | **Durable push consumers + queue/deliver groups** |
 | `ccc7f89` | this report + README |
 
 ### The keystone: an ordered push consumer
@@ -102,7 +105,7 @@ Both are wire-compatible with the whole NATS ecosystem, proven by **bidirectiona
   two JetStream task-group closures, an `NSLock`-guarded output pump in the
   `NatsServer` test helper, `@unchecked Sendable` on the two watchers which are
   iterated and stopped from different tasks, and a `#file → #filePath` fix for
-  v6's `ConciseMagicFile`). Debug and release build clean; all 253 tests pass.
+  v6's `ConciseMagicFile`). Debug and release build clean; all tests pass.
 
 ## A bug fixed for everyone, not just KV
 
@@ -130,28 +133,29 @@ sequentially, which set the pace more than the difficulty did.
 
 ### By the numbers
 
-- **14 commits**, 33 new source files (~6,463 net Sources LOC): the KV store,
-  the ordered/push consumer engine, the public consumer API, the ObjectStore,
-  the `Services` module, and the Swift 6 language-mode adoption.
-- **253 tests, 0 failures** against a real `nats-server`, including
+- **18 commits**, ~+13,026 / -98 lines (~7,299 net Sources LOC): the KV store,
+  the ordered/push consumer engine, the public consumer API, the ObjectStore
+  (incl. streaming IO), the `Services` module, per-message + KV TTL, durable/
+  queue-group push consumers, and the Swift 6 language-mode adoption.
+- **280 tests, 0 failures** against a real `nats-server`, including
   bidirectional `nats`-CLI interop for KV/ObjectStore/Services, deterministic
   reset/recovery tests (delete the consumer mid-watch → resume with no gap or
   dup), and leak tests each shown to fail without their fix.
 
 ## What remains for full "first-class general-purpose"
 
-The two stores, the ordered/push consumers, the modern consumer API, the
-Service API, and full Swift 6 language mode are all now in. The remaining items
-are additive and low-risk:
+Everything first-class is now in: the two stores, the ordered/push consumers
+(including **durable and queue/deliver-group** push consumers), the modern
+consumer API, the Service API, full Swift 6 language mode, **per-message + KV
+per-key TTL** (NATS 2.11+), and **ObjectStore streaming put/get**. What's left is
+niche parity/throughput work, not a first-class blocker:
 
-1. **Deferred consumer completeness** — durable push consumers, queue/deliver
-   groups, a pull-based ordered consumer, and the overlapping-pull throughput
-   optimization (the v1 pull `consume` uses a correct sequential batch loop).
-2. **Per-message TTL** (NATS 2.11+) in `StreamConfig` — small; needed only for
-   KV per-key TTL.
-3. **Object streaming IO** (file/`AsyncSequence<Data>` put/get) — the Data-based
-   API covers the common case; a streaming variant layers on the same chunk
-   loop without changing the wire format.
+1. **A pull-based ordered consumer** — nats.go v2 also offers ordered delivery on
+   a pull consumer; the push-based ordered consumer here already backs KV/Object
+   watch and the public consume/messages/next API.
+2. **Overlapping-pull throughput optimization** for the pull `consume`/`messages`
+   path — the current sequential batch loop is correct, just not maximally
+   pipelined.
 
 ## Recommendation: upstream, don't fork
 
@@ -169,6 +173,9 @@ every user. The pragmatic path is to **propose it upstream to
    and may have in-flight work).
 4. KeyValue, then ObjectStore, then the Service module on top.
 5. The Sendable keystone, then the full language-mode migration.
+6. The additive polish (per-message + KV TTL, ObjectStore streaming IO,
+   durable/queue-group push consumers) — each is independent and backward-
+   compatible, so it can land in any order after the surface it extends.
 
 A maintained private fork is the fallback if upstreaming stalls, but it is a
 standing maintenance cost and should be a last resort. Either way, the four

@@ -22,15 +22,20 @@ Currently, the client supports **Core NATS** with auth, TLS, lame duck mode and 
 `nats.go`/`async-nats` parity — see [FIRSTCLASS.md](./FIRSTCLASS.md)):
 
 - **JetStream KeyValue** — buckets, get/put/create/update/delete/purge with
-  optimistic concurrency, status, and hang-safe `watch`/`watchAll`/`keys`/
-  `history`/`purgeDeletes`.
+  optimistic concurrency, status, hang-safe `watch`/`watchAll`/`keys`/
+  `history`/`purgeDeletes`, and per-key TTL (NATS 2.11+).
 - **Ordered push consumer** — server-driven delivery with flow control, idle
   heartbeats, and automatic reset/recreate on gaps or disconnects (no message
   loss or duplication across a reset).
+- **Push consumers** — ephemeral, durable (persist across rebind), and
+  queue/deliver-group consumers that load-balance across instances.
 - **Modern consumer API** — `consume`/`messages`/`next` across pull, push and
   ordered consumers.
 - **JetStream ObjectStore** — chunked put/get with SHA-256 digest verification,
-  getInfo/delete/updateMeta/links/seal/status, and `watch`/`list`.
+  streaming put/get for large objects, getInfo/delete/updateMeta/links/seal/
+  status, and `watch`/`list`.
+- **Per-message TTL** — the `Nats-TTL` header (NATS 2.11+), wire-identical to
+  `nats.go`'s `time.Duration` formatting.
 - **Service (micro) API** — an actor-based service framework with endpoints,
   auto request/reply, `$SRV` PING/INFO/STATS discovery, and per-endpoint stats
   (the `Services` module).
