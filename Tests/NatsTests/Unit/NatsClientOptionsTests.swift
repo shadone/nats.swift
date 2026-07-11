@@ -20,7 +20,30 @@ class NatsClientOptionsTests: XCTestCase {
         ("testDefaultInboxPrefix", testDefaultInboxPrefix),
         ("testCustomInboxPrefix", testCustomInboxPrefix),
         ("testDefaultPortsInjection", testDefaultPortsInjection),
+        ("testDefaultMaxReconnectsIsUnlimited", testDefaultMaxReconnectsIsUnlimited),
+        ("testMaxReconnectsThreadsThroughToHandler", testMaxReconnectsThreadsThroughToHandler),
+        (
+            "testUnlimitedReconnectsThreadsThroughToHandler",
+            testUnlimitedReconnectsThreadsThroughToHandler
+        ),
     ]
+
+    /// Reads the private `maxReconnects` limit from a built client's connection
+    /// handler, where the reconnect loop actually enforces it (`nil` == unlimited).
+    private func handlerMaxReconnects(_ client: NatsClient) -> Int? {
+        guard let handler = client.connectionHandler else {
+            XCTFail("client has no connection handler")
+            return nil
+        }
+        let mirror = Mirror(reflecting: handler)
+        guard
+            let child = mirror.children.first(where: { $0.label == "maxReconnects" })
+        else {
+            XCTFail("Could not find maxReconnects on the connection handler")
+            return nil
+        }
+        return child.value as? Int
+    }
 
     func testDefaultInboxPrefix() {
         let client = NatsClientOptions().build()
@@ -83,5 +106,25 @@ class NatsClientOptionsTests: XCTestCase {
 
         XCTAssertEqual(internalUrls.count, 1, "Single URL should produce exactly one entry")
         XCTAssertEqual(internalUrls[0].port, 4222, "nats:// should default to 4222")
+    }
+
+    func testDefaultMaxReconnectsIsUnlimited() {
+        let client = NatsClientOptions().build()
+        XCTAssertNil(
+            handlerMaxReconnects(client), "Default reconnects should be unlimited (nil)")
+    }
+
+    func testMaxReconnectsThreadsThroughToHandler() {
+        let client = NatsClientOptions().maxReconnects(7).build()
+        XCTAssertEqual(
+            handlerMaxReconnects(client), 7, "A finite maxReconnects should reach the handler")
+    }
+
+    func testUnlimitedReconnectsThreadsThroughToHandler() {
+        // A previously configured finite limit is cleared by unlimitedReconnects() (last wins).
+        let client = NatsClientOptions().maxReconnects(3).unlimitedReconnects().build()
+        XCTAssertNil(
+            handlerMaxReconnects(client),
+            "unlimitedReconnects() should clear the limit to nil (unlimited)")
     }
 }

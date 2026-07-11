@@ -79,8 +79,24 @@ public class NatsClientOptions {
 
     /// Maximum number of reconnect attempts after each disconnect.
     /// Defaults to unlimited.
+    ///
+    /// To explicitly request unlimited reconnects, use
+    /// ``NatsClientOptions/unlimitedReconnects()`` rather than relying on this
+    /// method being left unset.
     public func maxReconnects(_ maxReconnects: Int) -> NatsClientOptions {
         self.maxReconnects = maxReconnects
+        return self
+    }
+
+    /// Requests unlimited reconnect attempts after each disconnect.
+    ///
+    /// This is the default behavior when ``NatsClientOptions/maxReconnects(_:)`` is
+    /// never called, but stating it explicitly makes the intent clear and lets a
+    /// caller override a previously configured finite limit (last call wins). Useful
+    /// for long-lived clients that must reconnect forever, e.g. services behind a
+    /// single load balancer that should never give up.
+    public func unlimitedReconnects() -> NatsClientOptions {
+        self.maxReconnects = nil
         return self
     }
 
