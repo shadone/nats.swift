@@ -11,6 +11,7 @@ let package = Package(
     products: [
         .library(name: "Nats", targets: ["Nats"]),
         .library(name: "JetStream", targets: ["JetStream"]),
+        .library(name: "Services", targets: ["Services"]),
         .library(name: "NatsServer", targets: ["NatsServer"])
     ],
     dependencies: [
@@ -40,6 +41,11 @@ let package = Package(
                 .product(name: "Logging", package: "swift-log"),
             ]),
         .target(
+            name: "Services",
+            dependencies: [
+                "Nats"
+            ]),
+        .target(
             name: "NatsServer",
             dependencies: [
                 .product(name: "Logging", package: "swift-log"),
@@ -55,6 +61,13 @@ let package = Package(
         .testTarget(
                 name: "JetStreamTests",
                 dependencies: ["Nats", "JetStream", "NatsServer"],
+                resources: [
+                .process("Integration/Resources")
+                ]
+        ),
+        .testTarget(
+                name: "ServicesTests",
+                dependencies: ["Nats", "Services", "NatsServer"],
                 resources: [
                 .process("Integration/Resources")
                 ]
