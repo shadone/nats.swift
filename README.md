@@ -38,8 +38,8 @@ Currently, the client supports **Core NATS** with auth, TLS, lame duck mode and 
   `ignoreDiscoveredServers()`, `waitForConnected()`, `state`/`isConnected`,
   `unlimitedReconnects()`.
 
-The public API surface is `Sendable`; a full Swift-6 language-mode migration of
-the transport core remains on the roadmap.
+The whole package builds under **Swift 6 language mode**
+(`swiftLanguageModes: [.v6]`) with strict concurrency enforced.
 
 ### JetStream KeyValue quick look
 

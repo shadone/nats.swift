@@ -33,6 +33,7 @@ findings fixed before commit. The final suite is **253 tests, 0 failures**.
 | `f62af34` | **ObjectStore** watch/list/updateMeta/links/seal/status |
 | `a7e251f` | **Service (micro) API** — a new `Services` module |
 | `f155008` | **Swift-6 keystone** — the public API surface is now `Sendable` |
+| `a5a32ec` | **Swift 6 language mode** adopted library-wide (`swiftLanguageModes: [.v6]`) |
 | `ccc7f89` | this report + README |
 
 ### The keystone: an ordered push consumer
@@ -92,14 +93,16 @@ Both are wire-compatible with the whole NATS ecosystem, proven by **bidirectiona
 
 - `waitForConnected()`, a public `state`/`isConnected` accessor, and
   `unlimitedReconnects()` — closing the exact out-of-band workarounds a real service needed.
-- The public surface is now **`Sendable`**: `NatsClient` is a checked
-  `Sendable`, `JetStreamContext` `Sendable` (with `setTimeout` preserved), and
-  `JetStreamMessage` a checked `Sendable` — so downstream consumers get
-  compiler-checked concurrency safety without `@preconcurrency` imports.
-  Complete strict-concurrency warnings in the library dropped from **211 → 4**
-  over the course of the work (the 4 residual are pre-existing
-  `NatsSubscription`/WebSocket diagnostics belonging to the not-yet-migrated
-  transport core).
+- The whole package now builds under **Swift 6 language mode**
+  (`swift-tools-version:6.0`, `swiftLanguageModes: [.v6]`) with strict
+  concurrency enforced as errors. `NatsClient`/`JetStreamContext`/
+  `JetStreamMessage` are `Sendable`; the transport core turned out to be
+  effectively clean once the keystone landed, and the remaining migration was a
+  small, behavior-preserving set of fixes (explicit `Sendable` capture lists on
+  two JetStream task-group closures, an `NSLock`-guarded output pump in the
+  `NatsServer` test helper, `@unchecked Sendable` on the two watchers which are
+  iterated and stopped from different tasks, and a `#file → #filePath` fix for
+  v6's `ConciseMagicFile`). Debug and release build clean; all 253 tests pass.
 
 ## A bug fixed for everyone, not just KV
 
@@ -127,10 +130,9 @@ sequentially, which set the pace more than the difficulty did.
 
 ### By the numbers
 
-- **12 feature commits**, 69 files, **+11,101 / -43** lines.
-- **33 new source files** (~6,463 net Sources LOC): the KV store, the ordered/
-  push consumer engine, the public consumer API, the ObjectStore, and the new
-  `Services` module.
+- **14 commits**, 33 new source files (~6,463 net Sources LOC): the KV store,
+  the ordered/push consumer engine, the public consumer API, the ObjectStore,
+  the `Services` module, and the Swift 6 language-mode adoption.
 - **253 tests, 0 failures** against a real `nats-server`, including
   bidirectional `nats`-CLI interop for KV/ObjectStore/Services, deterministic
   reset/recovery tests (delete the consumer mid-watch → resume with no gap or
@@ -138,22 +140,16 @@ sequentially, which set the pace more than the difficulty did.
 
 ## What remains for full "first-class general-purpose"
 
-The two stores, the ordered/push consumers, the modern consumer API, and the
-Service API are all now in. The remaining items:
+The two stores, the ordered/push consumers, the modern consumer API, the
+Service API, and full Swift 6 language mode are all now in. The remaining items
+are additive and low-risk:
 
-1. **Full Swift-6 language mode** — the public surface is `Sendable`, but
-   flipping `swiftLanguageMode` to `.v6` (warnings → errors) still needs the
-   pre-existing transport core migrated: `NatsSubscription` made `Sendable`, the
-   `AckFuture.wait()` / pull-`fetch` task-group closures and the WebSocket
-   bootstrap restructured for `sending`, and the `ConnectionHandler` event
-   system's `@Sendable`-closure churn. Moderate-to-high risk (it's the code
-   nobody added in this branch); the 4 residual strict warnings define it.
-2. **Deferred consumer completeness** — durable push consumers, queue/deliver
+1. **Deferred consumer completeness** — durable push consumers, queue/deliver
    groups, a pull-based ordered consumer, and the overlapping-pull throughput
    optimization (the v1 pull `consume` uses a correct sequential batch loop).
-3. **Per-message TTL** (NATS 2.11+) in `StreamConfig` — small; needed only for
+2. **Per-message TTL** (NATS 2.11+) in `StreamConfig` — small; needed only for
    KV per-key TTL.
-4. **Object streaming IO** (file/`AsyncSequence<Data>` put/get) — the Data-based
+3. **Object streaming IO** (file/`AsyncSequence<Data>` put/get) — the Data-based
    API covers the common case; a streaming variant layers on the same chunk
    loop without changing the wire format.
 
