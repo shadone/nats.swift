@@ -122,14 +122,45 @@ public final class KeyValue {
     /// > - ``JetStreamError/KeyValueError/keyExists(_:)`` if the key already holds
     /// >   a live value.
     public func create(_ key: String, _ value: Data) async throws -> UInt64 {
+        try await createEntry(key: key, value: value, ttl: nil)
+    }
+
+    /// Creates a value for the key with a per-key time-to-live, only if the key
+    /// does not currently hold a live value. The entry is automatically removed
+    /// after `ttl` elapses.
+    ///
+    /// Per-key TTLs only take effect when the bucket was created with
+    /// ``KeyValueConfig/limitMarkerTTL`` set; otherwise the TTL is silently
+    /// ignored by the server. As in nats.go, a TTL can only be attached on
+    /// create, not on `put` or `update`.
+    ///
+    /// - Parameters:
+    ///   - key: the key to create.
+    ///   - value: the value bytes.
+    ///   - ttl: the lifetime of the entry before it is removed.
+    ///
+    /// - Returns: the revision of the created entry.
+    ///
+    /// > **Throws:**
+    /// > - ``JetStreamError/KeyValueError/invalidKey(_:)`` if the key is invalid.
+    /// > - ``JetStreamError/KeyValueError/keyExists(_:)`` if the key already holds
+    /// >   a live value.
+    public func create(_ key: String, _ value: Data, ttl: NanoTimeInterval) async throws -> UInt64 {
+        try await createEntry(key: key, value: value, ttl: ttl)
+    }
+
+    private func createEntry(
+        key: String, value: Data, ttl: NanoTimeInterval?
+    ) async throws -> UInt64 {
         try KeyValueCoding.validateKey(key)
         do {
-            return try await updateUnchecked(key: key, value: value, revision: 0)
+            return try await updateUnchecked(key: key, value: value, revision: 0, ttl: ttl)
         } catch JetStreamError.KeyValueError.wrongLastRevision {
             // The key exists. If its latest entry is a tombstone we may re-create
             // over it using that revision as the expected last sequence.
             if let last = try await latestEntry(forKey: key), last.operation != .put {
-                return try await updateUnchecked(key: key, value: value, revision: last.revision)
+                return try await updateUnchecked(
+                    key: key, value: value, revision: last.revision, ttl: ttl)
             }
             throw JetStreamError.KeyValueError.keyExists(key)
         }
@@ -372,21 +403,25 @@ public final class KeyValue {
 
     /// Publishes a value with an expected-last-subject-sequence guard, mapping a
     /// compare-and-set failure to ``JetStreamError/KeyValueError/wrongLastRevision``.
-    private func updateUnchecked(key: String, value: Data, revision: UInt64) async throws -> UInt64
-    {
+    private func updateUnchecked(
+        key: String, value: Data, revision: UInt64, ttl: NanoTimeInterval? = nil
+    ) async throws -> UInt64 {
         var headers = NatsHeaderMap()
         headers[.expectedLastSubjectSequence] =
             KeyValueCoding.expectedLastSubjectSequenceValue(revision)
         do {
-            return try await publish(key: key, value: value, headers: headers)
+            return try await publish(key: key, value: value, headers: headers, ttl: ttl)
         } catch JetStreamError.PublishError.streamWrongLastSequence {
             throw JetStreamError.KeyValueError.wrongLastRevision
         }
     }
 
-    private func publish(key: String, value: Data, headers: NatsHeaderMap?) async throws -> UInt64 {
+    private func publish(
+        key: String, value: Data, headers: NatsHeaderMap?, ttl: NanoTimeInterval? = nil
+    ) async throws -> UInt64 {
         let subject = KeyValueCoding.subject(forBucket: bucket, key: key)
-        let ack = try await ctx.publish(subject, message: value, headers: headers).wait()
+        let ack = try await ctx.publish(subject, message: value, headers: headers, msgTTL: ttl)
+            .wait()
         return ack.seq
     }
 

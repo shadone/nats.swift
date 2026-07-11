@@ -117,6 +117,15 @@ enum KeyValueCoding {
         let ownsData = cfg.mirror == nil && (cfg.sources?.isEmpty ?? true)
         let subjects: [String]? = ownsData ? [allKeysFilterSubject(forBucket: cfg.bucket)] : nil
 
+        // A bucket-level marker TTL enables per-key TTLs: the backing stream must
+        // allow the `Nats-TTL` header and keep delete markers for that duration.
+        var allowMsgTTL: Bool?
+        var subjectDeleteMarkerTTL: NanoTimeInterval?
+        if let marker = cfg.limitMarkerTTL, marker.value > 0 {
+            allowMsgTTL = true
+            subjectDeleteMarkerTTL = marker
+        }
+
         return StreamConfig(
             name: streamName(forBucket: cfg.bucket),
             description: cfg.description,
@@ -139,16 +148,31 @@ enum KeyValueCoding {
             rePublish: cfg.republish,
             allowDirect: true,
             mirrorDirect: cfg.mirror != nil,
-            metadata: cfg.metadata)
+            metadata: cfg.metadata,
+            allowMsgTTL: allowMsgTTL,
+            subjectDeleteMarkerTTL: subjectDeleteMarkerTTL)
     }
 
     // MARK: - Entry decode
 
-    /// The operation carried in the `KV-Operation` header. Absent or unknown
-    /// values decode to ``KeyValueOperation/put``.
+    /// The operation carried in the `KV-Operation` header, falling back to a
+    /// server-placed `Nats-Marker-Reason` marker (used for TTL/max-age/purge
+    /// expirations). Absent or unknown values decode to ``KeyValueOperation/put``.
+    ///
+    /// Mirrors nats.go's decode: `MaxAge`/`Purge` markers are treated as a purge,
+    /// `Remove` as a delete, so a per-key TTL that has expired reads as absent.
     static func operation(from headers: NatsHeaderMap?) -> KeyValueOperation {
-        guard let value = headers?.get(.kvOperation) else { return .put }
-        return KeyValueOperation(rawValue: value.description) ?? .put
+        if let value = headers?.get(.kvOperation) {
+            return KeyValueOperation(rawValue: value.description) ?? .put
+        }
+        if let reason = headers?.get(.natsMarkerReason) {
+            switch reason.description {
+            case "MaxAge", "Purge": return .purge
+            case "Remove": return .delete
+            default: return .put
+            }
+        }
+        return .put
     }
 
     /// Decodes a fetched ``StreamMessage`` into a ``KeyValueEntry``.

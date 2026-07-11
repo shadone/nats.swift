@@ -81,12 +81,24 @@ extension JetStreamContext {
     ///   - subject: Subject on which the message will be published.
     ///   - message: NATS message payload.
     ///   - headers:Optional set of message headers.
+    ///   - msgTTL: Optional per-message time-to-live. When set, the message is
+    ///     removed from the stream after this interval. The value is sent in the
+    ///     `Nats-TTL` header (formatted as a Go duration string, e.g. `"5s"`) and
+    ///     is only honored when the target stream has ``StreamConfig/allowMsgTTL``
+    ///     enabled. Values `<= 0` are ignored.
     ///
     /// - Returns: ``AckFuture`` allowing to await for the ack from the server.
     public func publish(
-        _ subject: String, message: Data, headers: NatsHeaderMap? = nil
+        _ subject: String, message: Data, headers: NatsHeaderMap? = nil,
+        msgTTL: NanoTimeInterval? = nil
     ) async throws -> AckFuture {
         // TODO(pp): add stream header options (expected seq etc)
+        var headers = headers
+        if let msgTTL, msgTTL.value > 0 {
+            var withTTL = headers ?? NatsHeaderMap()
+            withTTL[.natsMsgTTL] = NatsHeaderValue(msgTTL.goDurationString())
+            headers = withTTL
+        }
         let inbox = client.newInbox()
         let sub = try await self.client.subscribe(subject: inbox)
         try await self.client.publish(message, subject: subject, reply: inbox, headers: headers)

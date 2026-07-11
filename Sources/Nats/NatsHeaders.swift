@@ -49,10 +49,12 @@ public struct NatsHeaderName: Equatable, Hashable, CustomStringConvertible, Send
 
     // KeyValue and publish-control headers.
     public static let kvOperation = try! NatsHeaderName("KV-Operation")
+    public static let natsMarkerReason = try! NatsHeaderName("Nats-Marker-Reason")
     public static let natsRollup = try! NatsHeaderName("Nats-Rollup")
     public static let expectedLastSubjectSequence = try! NatsHeaderName(
         "Nats-Expected-Last-Subject-Sequence")
     public static let natsMsgId = try! NatsHeaderName("Nats-Msg-Id")
+    public static let natsMsgTTL = try! NatsHeaderName("Nats-TTL")
 
     // Ordered/push-consumer control headers.
     public static let natsLastConsumer = try! NatsHeaderName("Nats-Last-Consumer")

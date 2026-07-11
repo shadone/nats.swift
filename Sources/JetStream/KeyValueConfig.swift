@@ -62,6 +62,16 @@ public struct KeyValueConfig {
     /// Configures the bucket to source from other buckets' backing streams.
     public var sources: [StreamSource]?
 
+    /// How long the bucket keeps delete markers when keys are removed by a TTL.
+    ///
+    /// Setting this enables per-key TTLs on the bucket: the backing stream is
+    /// created with ``StreamConfig/allowMsgTTL`` and its
+    /// ``StreamConfig/subjectDeleteMarkerTTL`` set to this value, which is also
+    /// required for watchers to be notified about TTL expirations. Per-key TTLs
+    /// (see ``KeyValue/create(_:_:ttl:)``) only take effect when this is set.
+    /// Requires nats-server v2.11.0 or later.
+    public var limitMarkerTTL: NanoTimeInterval?
+
     /// Creates a `KeyValueConfig` for a bucket with default settings.
     ///
     /// - Parameter bucket: the name of the bucket.
@@ -92,6 +102,10 @@ public struct KeyValueStatus {
     /// The number of bytes currently stored in the backing stream.
     public let bytes: UInt64
 
+    /// How long the bucket keeps delete markers when keys are removed by a TTL,
+    /// `nil` when per-key TTL markers are not enabled on the bucket.
+    public let limitMarkerTTL: NanoTimeInterval?
+
     /// The backing stream info the status was derived from.
     internal let streamInfo: StreamInfo
 
@@ -102,6 +116,7 @@ public struct KeyValueStatus {
         self.ttl = streamInfo.config.maxAge
         self.backingStore = "JetStream"
         self.bytes = streamInfo.state.bytes
+        self.limitMarkerTTL = streamInfo.config.subjectDeleteMarkerTTL
         self.streamInfo = streamInfo
     }
 }

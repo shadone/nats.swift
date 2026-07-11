@@ -530,6 +530,14 @@ public struct StreamConfig: Codable, Equatable {
     /// A set of application-defined key-value pairs for associating metadata on the stream.
     public var metadata: [String: String]?
 
+    /// Allows header-initiated per-message TTLs via the `Nats-TTL` header.
+    /// Requires nats-server v2.11.0 or later.
+    public var allowMsgTTL: Bool?
+
+    /// Enables and sets a duration for server-placed delete markers for delete,
+    /// purge and max-age limits. Requires nats-server v2.11.0 or later.
+    public var subjectDeleteMarkerTTL: NanoTimeInterval?
+
     public init(
         name: String,
         description: String? = nil,
@@ -561,7 +569,9 @@ public struct StreamConfig: Codable, Equatable {
         allowDirect: Bool = false,
         mirrorDirect: Bool = false,
         consumerLimits: StreamConsumerLimits? = nil,
-        metadata: [String: String]? = nil
+        metadata: [String: String]? = nil,
+        allowMsgTTL: Bool? = nil,
+        subjectDeleteMarkerTTL: NanoTimeInterval? = nil
     ) {
         self.name = name
         self.description = description
@@ -594,6 +604,8 @@ public struct StreamConfig: Codable, Equatable {
         self.mirrorDirect = mirrorDirect
         self.consumerLimits = consumerLimits
         self.metadata = metadata
+        self.allowMsgTTL = allowMsgTTL
+        self.subjectDeleteMarkerTTL = subjectDeleteMarkerTTL
     }
 
     enum CodingKeys: String, CodingKey {
@@ -628,6 +640,8 @@ public struct StreamConfig: Codable, Equatable {
         case mirrorDirect = "mirror_direct"
         case consumerLimits = "consumer_limits"
         case metadata
+        case allowMsgTTL = "allow_msg_ttl"
+        case subjectDeleteMarkerTTL = "subject_delete_marker_ttl"
     }
 
     // use custom encoder to omit certain fields if they are assigned default values
@@ -672,6 +686,10 @@ public struct StreamConfig: Codable, Equatable {
         try consumerLimits.map { try container.encode($0, forKey: .consumerLimits) }
         if let metadata = metadata, !metadata.isEmpty {
             try container.encode(metadata, forKey: .metadata)
+        }
+        try allowMsgTTL.map { try container.encode($0, forKey: .allowMsgTTL) }
+        try subjectDeleteMarkerTTL.map {
+            try container.encode($0, forKey: .subjectDeleteMarkerTTL)
         }
     }
 }

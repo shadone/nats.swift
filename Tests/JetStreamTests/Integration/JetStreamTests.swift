@@ -184,6 +184,10 @@ class JetStreamTests: XCTestCase {
 
         // we need to set the metadata to whatever was set by the server as it contains e.g. server version
         expectedConfig.metadata = stream.info.config.metadata
+        // nats-server 2.11+ echoes allow_msg_ttl (false when unset); reconcile it
+        // like metadata since it is server-populated.
+        expectedConfig.allowMsgTTL = stream.info.config.allowMsgTTL
+        expectedConfig.subjectDeleteMarkerTTL = stream.info.config.subjectDeleteMarkerTTL
 
         XCTAssertEqual(expectedConfig, stream.info.config)
 
@@ -275,6 +279,10 @@ class JetStreamTests: XCTestCase {
 
         // we need to set the metadata to whatever was set by the server as it contains e.g. server version
         cfg.metadata = stream.info.config.metadata
+        // nats-server 2.11+ echoes allow_msg_ttl (false when unset); reconcile it
+        // like metadata since it is server-populated.
+        cfg.allowMsgTTL = stream.info.config.allowMsgTTL
+        cfg.subjectDeleteMarkerTTL = stream.info.config.subjectDeleteMarkerTTL
 
         XCTAssertEqual(stream.info.config, cfg)
     }
