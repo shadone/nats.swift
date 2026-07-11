@@ -73,6 +73,63 @@ public final class NatsSubscription: AsyncSequence, Sendable {
         return SubscriptionIterator(subscription: self)
     }
 
+    /// Non-suspending poll: returns an already-buffered message without ever waiting, or `nil` when
+    /// nothing is ready RIGHT NOW. A `nil` here means "would block" — it is NOT end-of-stream (call
+    /// `nextMessage()` to await and to observe close). A buffered error is thrown, matching
+    /// `nextMessage()`. Used by JetStream push delivery to skip its heartbeat-timeout task group when
+    /// the deliver inbox already has a message in hand. `package`-visible: an internal optimization
+    /// primitive, not end-user API.
+    package func tryNextMessage() throws -> NatsMessage? {
+        enum Outcome {
+            case message(NatsMessage)
+            case failure(NatsError.SubscriptionError)
+            case empty
+        }
+        // Mirror `nextMessage`'s bookkeeping (delivered++ on a consumed slot), but only when a
+        // message is actually taken — an empty poll consumes nothing, so the caller's fallback
+        // `nextMessage()` still accounts for exactly one delivery. (Because `tryNext` bumps
+        // `delivered` only on a taken message while `nextMessage` bumps it per call, mixing the two
+        // on a subscription that set an `unsubscribe(max:)` limit could shift the auto-unsubscribe
+        // point; the JetStream deliver inbox sets no max, so this is inert here.)
+        let outcome: Outcome = state.withLockedValue { state in
+            // Closed always wins, even over buffered content — matches `nextMessage`, which returns
+            // `nil` on a closed subscription before inspecting the buffer. Reporting `.empty` lets
+            // the caller's async fallback observe the end-of-stream `nil`.
+            if state.closed {
+                return .empty
+            }
+            guard let first = state.buffer.first else {
+                return .empty
+            }
+            state.buffer.removeFirst()
+            state.delivered += 1
+            switch first {
+            case .success(let message): return .message(message)
+            case .failure(let error): return .failure(error)
+            }
+        }
+
+        switch outcome {
+        case .empty:
+            return nil
+        case .failure(let error):
+            removeIfAtMax()
+            throw error
+        case .message(let message):
+            removeIfAtMax()
+            return message
+        }
+    }
+
+    /// Auto-unsubscribe once `delivered` reaches an `unsubscribe(max:)` limit — the same check
+    /// `nextMessage()` performs after taking a message. Inert for push delivery (no max is set).
+    private func removeIfAtMax() {
+        let delivered = state.withLockedValue { $0.delivered }
+        if let max, delivered >= max {
+            conn.removeSub(sub: self)
+        }
+    }
+
     func receiveMessage(_ message: NatsMessage) {
         let continuationToResume:
             CheckedContinuation<Result<NatsMessage, NatsError.SubscriptionError>?, Never>? =
@@ -134,6 +191,12 @@ public final class NatsSubscription: AsyncSequence, Sendable {
 
         public func next() async throws -> Element? {
             try await subscription.nextMessage()
+        }
+
+        /// Non-suspending poll; see ``NatsSubscription/tryNextMessage()``. `nil` means "nothing ready
+        /// now", not end-of-stream.
+        package func tryNext() throws -> Element? {
+            try subscription.tryNextMessage()
         }
     }
 

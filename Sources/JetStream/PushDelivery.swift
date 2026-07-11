@@ -175,6 +175,17 @@ internal final class PushDelivery {
             return .message(pending)
         }
 
+        // Fast path: if the deliver inbox already has a message buffered, take it WITHOUT building
+        // the heartbeat-timeout task group. Under real throughput the inbox is rarely empty, so the
+        // group (and its two per-message child tasks) is skipped on the hot path. This is a pure
+        // optimization: the message is the same one `iterator.next()` would return, in the same FIFO
+        // order, and it is still classified by `handle()` (flow-control replies included) exactly as
+        // before. A missed heartbeat can only occur while the inbox is idle — i.e. the empty case
+        // handled below — so heartbeat detection and the dead-heat stash are untouched.
+        if let ready = try iterator.tryNext() {
+            return .message(ready)
+        }
+
         if idleHeartbeatSeconds <= 0 {
             if let msg = try await iterator.next() {
                 return .message(msg)
