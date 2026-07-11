@@ -29,11 +29,17 @@ Currently, the client supports **Core NATS** with auth, TLS, lame duck mode and 
   loss or duplication across a reset).
 - **Modern consumer API** — `consume`/`messages`/`next` across pull, push and
   ordered consumers.
+- **JetStream ObjectStore** — chunked put/get with SHA-256 digest verification,
+  getInfo/delete/updateMeta/links/seal/status, and `watch`/`list`.
+- **Service (micro) API** — an actor-based service framework with endpoints,
+  auto request/reply, `$SRV` PING/INFO/STATS discovery, and per-endpoint stats
+  (the `Services` module).
 - **Connection ergonomics** — inline credentials (no temp file),
   `ignoreDiscoveredServers()`, `waitForConnected()`, `state`/`isConnected`,
   `unlimitedReconnects()`.
 
-Object Store and the Service API remain on the roadmap.
+The public API surface is `Sendable`; a full Swift-6 language-mode migration of
+the transport core remains on the roadmap.
 
 ### JetStream KeyValue quick look
 
