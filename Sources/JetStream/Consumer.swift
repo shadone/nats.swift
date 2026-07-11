@@ -219,6 +219,18 @@ public struct ConsumerConfig: Codable, Equatable {
     /// A set of application-defined key-value pairs for associating metadata on the consumer.
     public var metadata: [String: String]?
 
+    /// Push consumer: the subject the server delivers messages to. Setting this makes the consumer push-based.
+    public var deliverSubject: String?
+
+    /// Push consumer: an optional queue group for load-balanced push delivery.
+    public var deliverGroup: String?
+
+    /// Push consumer: enables flow control. Requires ``ConsumerConfig/idleHeartbeat`` to also be set.
+    public var flowControl: Bool?
+
+    /// Push consumer: interval at which the server sends idle heartbeats when no messages are available.
+    public var idleHeartbeat: NanoTimeInterval?
+
     public init(
         name: String? = nil,
         durable: String? = nil,
@@ -244,7 +256,11 @@ public struct ConsumerConfig: Codable, Equatable {
         inactiveThreshold: NanoTimeInterval? = nil,
         replicas: Int = 1,
         memoryStorage: Bool? = nil,
-        metadata: [String: String]? = nil
+        metadata: [String: String]? = nil,
+        deliverSubject: String? = nil,
+        deliverGroup: String? = nil,
+        flowControl: Bool? = nil,
+        idleHeartbeat: NanoTimeInterval? = nil
     ) {
         self.name = name
         self.durable = durable
@@ -271,6 +287,10 @@ public struct ConsumerConfig: Codable, Equatable {
         self.memoryStorage = memoryStorage
         self.filterSubjects = filterSubjects
         self.metadata = metadata
+        self.deliverSubject = deliverSubject
+        self.deliverGroup = deliverGroup
+        self.flowControl = flowControl
+        self.idleHeartbeat = idleHeartbeat
     }
 
     enum CodingKeys: String, CodingKey {
@@ -299,6 +319,10 @@ public struct ConsumerConfig: Codable, Equatable {
         case memoryStorage = "mem_storage"
         case filterSubjects = "filter_subjects"
         case metadata
+        case deliverSubject = "deliver_subject"
+        case deliverGroup = "deliver_group"
+        case flowControl = "flow_control"
+        case idleHeartbeat = "idle_heartbeat"
     }
 }
 

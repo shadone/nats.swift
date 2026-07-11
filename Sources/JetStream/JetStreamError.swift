@@ -117,6 +117,17 @@ public enum JetStreamError {
         }
     }
 
+    public enum OrderedConsumerError: JetStreamErrorProtocol {
+        case closed
+
+        public var description: String {
+            switch self {
+            case .closed:
+                return "nats: ordered consumer closed"
+            }
+        }
+    }
+
     public enum StreamError: JetStreamErrorProtocol {
         case nameRequired
         case invalidStreamName(String)

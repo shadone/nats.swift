@@ -53,6 +53,11 @@ public struct NatsHeaderName: Equatable, Hashable, CustomStringConvertible, Send
     public static let expectedLastSubjectSequence = try! NatsHeaderName(
         "Nats-Expected-Last-Subject-Sequence")
     public static let natsMsgId = try! NatsHeaderName("Nats-Msg-Id")
+
+    // Ordered/push-consumer control headers.
+    public static let natsLastConsumer = try! NatsHeaderName("Nats-Last-Consumer")
+    public static let natsLastStream = try! NatsHeaderName("Nats-Last-Stream")
+    public static let natsConsumerStalled = try! NatsHeaderName("Nats-Consumer-Stalled")
     // Add other standard headers as needed...
 }
 
