@@ -87,7 +87,12 @@ internal actor OrderedConsumer {
 
     private var cursor = OrderedConsumerCursor()
     private var serial: Int = 0
+    /// The `num_pending` reported by the ConsumerInfo of the FIRST successful create, captured
+    /// before any delivery. `nil` until that create completes; never updated by later recreates.
+    /// The KV watcher reads it to size its end-of-initial-values accounting.
+    private var initialNumPending: UInt64?
     private var resetInProgress = false
+    private var startInvoked = false
     private var closed = false
     private var disconnected = false
     private var currentSub: NatsSubscription?
@@ -123,12 +128,38 @@ internal actor OrderedConsumer {
 
     // MARK: Lifecycle
 
-    /// Starts the delivery pump. Idempotent; a no-op after ``stop()``.
-    internal func start() {
-        guard pumpTask == nil, !closed else {
+    /// Creates the FIRST consumer synchronously (failing fast) and then starts the delivery pump.
+    ///
+    /// The initial creation is a single attempt: if the stream/bucket does not exist, the filter
+    /// subject is invalid, or permission is denied, the error is thrown out of `start()` rather than
+    /// the pump wedging forever in the capped-infinite-backoff loop used for POST-success resets.
+    /// This mirrors nats.go, which creates the subscription synchronously in `WatchFiltered` and
+    /// returns its error. The pump only begins its read loop AFTER a successful first creation.
+    ///
+    /// On a first-creation failure nothing is left half-alive: the connection listener is dropped,
+    /// the `messages` stream is finished by throwing, and no subscription/consumer/`Task` leaks
+    /// (`recreate` tears down any subscription it created for the failed attempt).
+    ///
+    /// Idempotent; a no-op once started or after ``stop()``.
+    internal func start() async throws {
+        guard !startInvoked, !closed else {
             return
         }
+        // Set synchronously before the first `await` so the actor serializes concurrent `start()`
+        // calls to exactly one initial creation.
+        startInvoked = true
         registerConnectionListener()
+        do {
+            try await recreate(maxAttempts: 1)
+        } catch {
+            closed = true
+            if let id = connListenerId {
+                ctx.client.off(id)
+                connListenerId = nil
+            }
+            continuation.finish(throwing: error)
+            throw error
+        }
         pumpTask = Task { [weak self] in
             await self?.pump()
         }
@@ -174,6 +205,13 @@ internal actor OrderedConsumer {
     /// The name of the currently active server-side consumer, if any. Exposed for tests.
     internal func currentConsumerName() -> String? {
         currentName
+    }
+
+    /// The `num_pending` captured from the first successful consumer creation, or `nil` if the
+    /// consumer has not been created yet. Stable across recreates; used by the KV watcher to detect
+    /// when all initial values have been delivered.
+    internal func initialPending() -> UInt64? {
+        initialNumPending
     }
 
     // MARK: Reset guard
@@ -245,13 +283,9 @@ internal actor OrderedConsumer {
     // MARK: Pump
 
     private func pump() async {
-        do {
-            try await recreate()
-        } catch {
-            continuation.finish()
-            return
-        }
-
+        // The FIRST consumer was already created (fail-fast) by `start()`, which sets `currentSub`
+        // before spawning this pump; the loop below reads from it directly. Only RESET recreates
+        // (post-success) run inside this loop, and those keep the infinite capped backoff.
         while !closed {
             guard let sub = currentSub else {
                 break
@@ -395,9 +429,16 @@ internal actor OrderedConsumer {
 }
 
 extension OrderedConsumer {
-    /// Async recreate implementation. Kept in an extension so the state-machine body above stays
+    /// Async (re)create implementation. Kept in an extension so the state-machine body above stays
     /// focused; behaviour matches nats.go `resetOrderedConsumer` + `getConsumerConfig`.
-    fileprivate func recreate() async throws {
+    ///
+    /// - Parameter maxAttempts: the number of create attempts before giving up. `nil` (the default)
+    ///   retries forever with capped backoff — the correct behaviour for a POST-success reset of a
+    ///   consumer that was already working. A bounded value is used for the FAIL-FAST first creation
+    ///   from ``start()``: once the attempts are exhausted the underlying error is propagated (so a
+    ///   missing stream / invalid filter / permission denial surfaces immediately) instead of
+    ///   hanging. `1` is a single synchronous attempt, matching nats.go's `WatchFiltered`.
+    fileprivate func recreate(maxAttempts: Int? = nil) async throws {
         // Tear down the current subscription.
         if let sub = currentSub {
             try? await sub.unsubscribe()
@@ -412,6 +453,7 @@ extension OrderedConsumer {
         serial += 1
 
         var interval: UInt64 = 1_000_000_000  // 1s initial backoff.
+        var attempt = 0
         while true {
             if closed {
                 throw JetStreamError.OrderedConsumerError.closed
@@ -451,6 +493,9 @@ extension OrderedConsumer {
 
                 currentSub = sub
                 currentName = consumer.info.name
+                if initialNumPending == nil {
+                    initialNumPending = consumer.info.numPending
+                }
                 resetInProgress = false
                 return
             } catch {
@@ -462,6 +507,12 @@ extension OrderedConsumer {
                     // name and `createOrUpdateConsumer` is idempotent.
                     deleteConsumerBestEffort("\(namePrefix)_\(serial)")
                     throw JetStreamError.OrderedConsumerError.closed
+                }
+                attempt += 1
+                if let maxAttempts, attempt >= maxAttempts {
+                    // Fail-fast (first-creation) path: propagate the real error instead of
+                    // entering the infinite backoff reserved for post-success resets.
+                    throw error
                 }
                 try? await Task.sleep(nanoseconds: interval)
                 interval = min(interval * 2, 10_000_000_000)

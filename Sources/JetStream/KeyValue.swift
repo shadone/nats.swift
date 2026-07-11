@@ -21,10 +21,9 @@ import Nats
 /// ``JetStreamContext/createKeyValue(cfg:)`` or
 /// ``JetStreamContext/createOrUpdateKeyValue(cfg:)``.
 ///
-/// This foundation exposes value access (`get`), writes (`put`, `create`,
-/// `update`), tombstones (`delete`, `purge`) and `status`. Consumer-based
-/// operations (`watch`, `watchAll`, `keys`, `history`, `purgeDeletes`) are
-/// provided separately.
+/// This exposes value access (`get`), writes (`put`, `create`, `update`),
+/// tombstones (`delete`, `purge`), `status`, and the consumer-based operations
+/// `watch`, `watchAll`, `keys`, `history` and `purgeDeletes`.
 public final class KeyValue {
 
     /// The name of the bucket.
@@ -213,7 +212,149 @@ public final class KeyValue {
         return KeyValueStatus(bucket: bucket, streamInfo: info)
     }
 
+    // MARK: - Watch
+
+    /// Watches keys matching a filter, which may contain the `*` and `>`
+    /// wildcards. The returned ``KeyValueWatcher`` first delivers the current
+    /// value of each matched key, then a `nil` marker, then live updates.
+    ///
+    /// - Parameters:
+    ///   - keys: the key or wildcard filter to watch, appended to the bucket
+    ///     subject prefix (`$KV.<bucket>.<keys>`). Not validated as a key, so
+    ///     wildcards are permitted.
+    ///   - opts: the watch options.
+    ///
+    /// - Returns: a ``KeyValueWatcher``. Call ``KeyValueWatcher/stop()`` when done.
+    public func watch(
+        _ keys: String, opts: KeyValueWatchOptions = .init()
+    ) async throws -> KeyValueWatcher {
+        let watcher = KeyValueWatcher(
+            ctx: ctx,
+            streamName: KeyValueCoding.streamName(forBucket: bucket),
+            bucket: bucket,
+            filterSubject: KeyValueCoding.subject(forBucket: bucket, key: keys),
+            opts: opts)
+        try await watcher.start()
+        return watcher
+    }
+
+    /// Watches every key in the bucket. Equivalent to ``watch(_:opts:)`` with the
+    /// `>` filter.
+    ///
+    /// - Parameter opts: the watch options.
+    ///
+    /// - Returns: a ``KeyValueWatcher``. Call ``KeyValueWatcher/stop()`` when done.
+    public func watchAll(opts: KeyValueWatchOptions = .init()) async throws -> KeyValueWatcher {
+        let watcher = KeyValueWatcher(
+            ctx: ctx,
+            streamName: KeyValueCoding.streamName(forBucket: bucket),
+            bucket: bucket,
+            filterSubject: KeyValueCoding.allKeysFilterSubject(forBucket: bucket),
+            opts: opts)
+        try await watcher.start()
+        return watcher
+    }
+
+    /// Returns the sorted, de-duplicated list of live keys in the bucket,
+    /// excluding keys whose latest entry is a `delete`/`purge` tombstone.
+    ///
+    /// - Returns: the live keys, sorted ascending.
+    ///
+    /// > **Throws:**
+    /// > - ``JetStreamError/KeyValueError/noKeysFound`` if the bucket holds no
+    /// >   live keys.
+    public func keys() async throws -> [String] {
+        var opts = KeyValueWatchOptions()
+        opts.ignoreDeletes = true
+        opts.metaOnly = true
+        let watcher = try await watchAll(opts: opts)
+        let entries = try await collectInitialValues(from: watcher)
+
+        var result: [String] = []
+        for key in entries.map({ $0.key }).sorted() where result.last != key {
+            result.append(key)
+        }
+        if result.isEmpty {
+            throw JetStreamError.KeyValueError.noKeysFound
+        }
+        return result
+    }
+
+    /// Returns every historical entry for a key, oldest first, including
+    /// `delete`/`purge` tombstones.
+    ///
+    /// - Parameter key: the key to fetch history for.
+    ///
+    /// - Returns: the historical entries in revision order.
+    ///
+    /// > **Throws:**
+    /// > - ``JetStreamError/KeyValueError/keyNotFound`` if the key has no history.
+    public func history(_ key: String) async throws -> [KeyValueEntry] {
+        var opts = KeyValueWatchOptions()
+        opts.includeHistory = true
+        let watcher = try await watch(key, opts: opts)
+        let entries = try await collectInitialValues(from: watcher)
+        if entries.isEmpty {
+            throw JetStreamError.KeyValueError.keyNotFound
+        }
+        return entries
+    }
+
+    /// Removes `delete`/`purge` tombstone markers from the bucket.
+    ///
+    /// Collects the current state of every key first (stopping the watcher), then
+    /// purges the subject of each key whose latest entry is a tombstone. Purging
+    /// happens only after the watcher is stopped: a live watcher would keep
+    /// bumping the consumer's `numPending` and prevent the end-of-initial marker.
+    ///
+    /// - Parameter olderThan: when set, only tombstones older than this age are
+    ///   fully removed; younger tombstones keep their marker (their prior history
+    ///   is still rolled up). An explicit `0` — like any negative value — removes
+    ///   every delete/purge marker regardless of age. When `nil`, a default of 30
+    ///   minutes is used.
+    public func purgeDeletes(olderThan: TimeInterval? = nil) async throws {
+        let watcher = try await watchAll()
+        let entries = try await collectInitialValues(from: watcher)
+
+        let threshold = olderThan ?? (30 * 60)
+        let limit: Date? = threshold > 0 ? Date().addingTimeInterval(-threshold) : nil
+
+        for entry in entries where entry.operation == .delete || entry.operation == .purge {
+            let subject = KeyValueCoding.subject(forBucket: bucket, key: entry.key)
+            if let limit, let created = KeyValueCoding.date(fromRFC3339: entry.created),
+                created > limit
+            {
+                // Marker is younger than the limit: keep it, roll up its history.
+                _ = try await stream.purge(keep: 1, subject: subject)
+            } else {
+                _ = try await stream.purge(subject: subject)
+            }
+        }
+    }
+
     // MARK: - Internals
+
+    /// Drains a watcher's initial values up to (and excluding) the `nil`
+    /// end-of-initial-values marker, then stops the watcher. Serves `keys`,
+    /// `history` and `purgeDeletes`, all of which want only the initial snapshot.
+    private func collectInitialValues(
+        from watcher: KeyValueWatcher
+    ) async throws -> [KeyValueEntry] {
+        var entries: [KeyValueEntry] = []
+        do {
+            for try await entry in watcher {
+                guard let entry else {
+                    break  // nil marker: all initial values received.
+                }
+                entries.append(entry)
+            }
+        } catch {
+            await watcher.stop()
+            throw error
+        }
+        await watcher.stop()
+        return entries
+    }
 
     /// Fetches the latest entry for the key without collapsing tombstones, or
     /// nil when the key has never been written.

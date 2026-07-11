@@ -169,6 +169,51 @@ enum KeyValueCoding {
             operation: operation(from: message.headers))
     }
 
+    /// Decodes a live push-consumer delivery into a ``KeyValueEntry``.
+    ///
+    /// Unlike the point-read decode above, the revision, timestamp and `delta`
+    /// come from the message's JetStream ``MessageMetadata`` (parsed from the
+    /// `$JS.ACK` reply subject): the metadata's `pending` count is carried into
+    /// `delta`, which the watcher uses to detect the end of initial values.
+    static func entry(
+        from message: NatsMessage, metadata: MessageMetadata, bucket: String
+    ) -> KeyValueEntry {
+        let entryKey = key(fromSubject: message.subject, bucket: bucket) ?? message.subject
+        return KeyValueEntry(
+            bucket: bucket,
+            key: entryKey,
+            value: message.payload ?? Data(),
+            revision: metadata.streamSequence,
+            created: rfc3339(fromAckTimestamp: metadata.timestamp),
+            delta: metadata.pending,
+            operation: operation(from: message.headers))
+    }
+
+    // MARK: - Timestamps
+
+    /// A shared RFC3339 formatter with fractional seconds. Immutable after
+    /// configuration, so it is safe to read concurrently.
+    private static let rfc3339Formatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    /// Formats a JetStream `$JS.ACK` timestamp token (Unix nanoseconds, as a
+    /// decimal string) as an RFC3339 string, matching the `created` format used
+    /// by point reads. Returns the raw token if it is not an integer.
+    static func rfc3339(fromAckTimestamp token: String) -> String {
+        guard let nanos = UInt64(token) else { return token }
+        let date = Date(timeIntervalSince1970: Double(nanos) / 1_000_000_000)
+        return rfc3339Formatter.string(from: date)
+    }
+
+    /// Parses an RFC3339 `created` timestamp back into a `Date`, or nil when the
+    /// string is not RFC3339.
+    static func date(fromRFC3339 string: String) -> Date? {
+        rfc3339Formatter.date(from: string)
+    }
+
     // MARK: - Publish headers
 
     /// Builds the `Nats-Expected-Last-Subject-Sequence` header value used to

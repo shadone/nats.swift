@@ -47,7 +47,7 @@ final class OrderedConsumerTests: XCTestCase {
         let oc = OrderedConsumer(
             ctx: ctx, streamName: "test", deliverPolicy: .all,
             namePrefix: "ord", idleHeartbeat: 0.2)
-        await oc.start()
+        try await oc.start()
 
         // Watchdog: if delivery stalls (broken build), finish the stream so reads unblock and fail.
         let watchdog = watchdog(for: oc, after: 20)
@@ -103,7 +103,7 @@ final class OrderedConsumerTests: XCTestCase {
         let oc = OrderedConsumer(
             ctx: ctx, streamName: "test", deliverPolicy: .all,
             namePrefix: "ord", idleHeartbeat: 0.1)
-        await oc.start()
+        try await oc.start()
 
         let watchdog = watchdog(for: oc, after: 30)
         defer { watchdog.cancel() }
@@ -156,7 +156,7 @@ final class OrderedConsumerTests: XCTestCase {
         for i in 0..<60 {
             let oc = OrderedConsumer(
                 ctx: ctx, streamName: "test", deliverPolicy: .all, idleHeartbeat: 0.2)
-            await oc.start()
+            try await oc.start()
             try await Task.sleep(nanoseconds: UInt64(i) * 100_000)
             await oc.stop()
         }
@@ -177,7 +177,7 @@ final class OrderedConsumerTests: XCTestCase {
 
         let oc = OrderedConsumer(
             ctx: ctx, streamName: "test", deliverPolicy: .all, idleHeartbeat: 0.2)
-        await oc.start()
+        try await oc.start()
 
         let watchdog = watchdog(for: oc, after: 20)
         defer { watchdog.cancel() }

@@ -372,6 +372,7 @@ public enum JetStreamError {
 
     public enum KeyValueError: JetStreamErrorProtocol {
         case keyNotFound
+        case noKeysFound
         case bucketNotFound(String)
         case invalidKey(String)
         case invalidBucketName(String)
@@ -385,6 +386,8 @@ public enum JetStreamError {
             switch self {
             case .keyNotFound:
                 return "nats: key not found"
+            case .noKeysFound:
+                return "nats: no keys found"
             case .bucketNotFound(let bucket):
                 return "nats: bucket not found: \(bucket)"
             case .invalidKey(let key):
