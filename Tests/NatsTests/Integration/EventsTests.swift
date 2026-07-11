@@ -19,7 +19,7 @@ import XCTest
 
 class TestNatsEvents: XCTestCase {
 
-    static var allTests = [
+    nonisolated(unsafe) static let allTests = [
         ("testClientConnectedEvent", testClientConnectedEvent),
         ("testClientClosedEvent", testClientClosedEvent),
         ("testClientReconnectEvent", testClientReconnectEvent),

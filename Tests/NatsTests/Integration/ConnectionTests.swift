@@ -19,7 +19,7 @@ import XCTest
 
 class CoreNatsTests: XCTestCase {
 
-    static var allTests = [
+    nonisolated(unsafe) static let allTests = [
         ("testRtt", testRtt),
         ("testPublish", testPublish),
         ("testSuspendAndResume", testSuspendAndResume),

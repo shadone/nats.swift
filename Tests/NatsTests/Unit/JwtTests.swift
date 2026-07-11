@@ -18,13 +18,17 @@ import XCTest
 
 class JwtTests: XCTestCase {
 
-    static var allTests = [
+    nonisolated(unsafe) static let allTests = [
         ("testParseCredentialsFile", testParseCredentialsFile)
     ]
 
     func testParseCredentialsFile() async throws {
         logger.logLevel = .critical
-        let currentFile = URL(fileURLWithPath: #file)
+        // `#filePath` (not `#file`): under the Swift 6 language mode the
+        // `ConciseMagicFile` feature makes `#file` expand to `Module/File.swift`
+        // rather than the absolute path, which would resolve the creds resource
+        // relative to the CWD and fail. `#filePath` is always the full path.
+        let currentFile = URL(fileURLWithPath: #filePath)
         let testDir = currentFile.deletingLastPathComponent().deletingLastPathComponent()
         let resourceURL = testDir.appendingPathComponent("Integration/Resources/TestUser.creds")
         let credsData = try await URLSession.shared.data(from: resourceURL).0

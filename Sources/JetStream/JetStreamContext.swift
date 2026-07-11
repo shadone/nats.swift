@@ -159,13 +159,18 @@ public struct AckFuture {
         let response = try await withThrowingTaskGroup(
             of: NatsMessage?.self,
             body: { group in
-                group.addTask {
+                // Capture the already-Sendable `sub`/`timeout` by value so each child
+                // task closure carries an immutable Sendable copy instead of implicitly
+                // capturing `self` (the non-Sendable-region `AckFuture`), which stays in
+                // use by the current task. Behavior is unchanged: `sub` is a class
+                // reference and `timeout` is a value.
+                group.addTask { [sub] in
                     return try await sub.makeAsyncIterator().next()
                 }
 
                 // task for the timeout
-                group.addTask {
-                    try await Task.sleep(nanoseconds: UInt64(self.timeout * 1_000_000_000))
+                group.addTask { [timeout] in
+                    try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
                     return nil
                 }
 

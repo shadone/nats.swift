@@ -175,7 +175,11 @@ public class FetchResult: AsyncSequence {
                 group.addTask {
                     return try await subIterator.next()
                 }
-                group.addTask {
+                // Capture the already-Sendable `sub` by value so the child task holds an
+                // immutable Sendable copy of the reference rather than implicitly capturing
+                // `self` (the `FetchIterator` region still in use by the current task).
+                // Behavior is unchanged: `sub` is a class reference.
+                group.addTask { [sub] in
                     try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
                     try await sub.unsubscribe()
                     return nil

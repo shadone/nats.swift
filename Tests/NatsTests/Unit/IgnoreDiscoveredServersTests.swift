@@ -17,7 +17,7 @@ import XCTest
 @testable import Nats
 
 final class IgnoreDiscoveredServersTests: XCTestCase {
-    static var allTests = [
+    nonisolated(unsafe) static let allTests = [
         ("testDiscoveredServersIngestedByDefault", testDiscoveredServersIngestedByDefault),
         ("testDiscoveredServersSuppressedWhenIgnored", testDiscoveredServersSuppressedWhenIgnored),
         ("testOptionThreadsThrough", testOptionThreadsThrough),

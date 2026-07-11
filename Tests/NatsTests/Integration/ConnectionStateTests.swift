@@ -19,7 +19,7 @@ import XCTest
 
 class ConnectionStateTests: XCTestCase {
 
-    static var allTests = [
+    nonisolated(unsafe) static let allTests = [
         ("testWaitForConnected", testWaitForConnected),
         (
             "testWaitForConnectedWithRetryOnFailedConnect",

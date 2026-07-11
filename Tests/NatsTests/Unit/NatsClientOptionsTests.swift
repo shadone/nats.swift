@@ -16,7 +16,7 @@ import XCTest
 @testable import Nats
 
 class NatsClientOptionsTests: XCTestCase {
-    static var allTests = [
+    nonisolated(unsafe) static let allTests = [
         ("testDefaultInboxPrefix", testDefaultInboxPrefix),
         ("testCustomInboxPrefix", testCustomInboxPrefix),
         ("testDefaultPortsInjection", testDefaultPortsInjection),

@@ -69,55 +69,70 @@ public class NatsServer {
 
         let outputHandle = pipe.fileHandleForReading
         let semaphore = DispatchSemaphore(value: 0)
-        var lineCount = 0
         let maxLines = 100
-        var serverError: String?
-        var outputBuffer = Data()
+
+        // The stdout pump runs on a background dispatch queue (the FileHandle's
+        // readabilityHandler) while this method blocks on `semaphore`. Its mutable
+        // state — plus the port/TLS values discovered while parsing the log — lives
+        // in a Sendable, lock-guarded holder captured by the closure instead of
+        // local `var`s and `self`. Delivery is serial, so behavior is unchanged; the
+        // holder only makes the synchronization visible to the compiler.
+        let probe = StartupProbe()
 
         outputHandle.readabilityHandler = { fileHandle in
             let data = fileHandle.availableData
             guard data.count > 0 else { return }
-            outputBuffer.append(data)
 
-            guard let output = String(data: outputBuffer, encoding: .utf8) else { return }
+            let done: Bool = probe.withState { state in
+                state.outputBuffer.append(data)
 
-            let lines = output.split(separator: "\n", omittingEmptySubsequences: false)
-            let completedLines = lines.dropLast()
-
-            for lineSequence in completedLines {
-                let line = String(lineSequence)
-                lineCount += 1
-
-                let errorLine = self.extracErrorMessage(from: line)
-
-                if let port = self.extractPort(from: line, for: "client connections") {
-                    self.natsServerPort = port
+                guard let output = String(data: state.outputBuffer, encoding: .utf8) else {
+                    return false
                 }
 
-                if let port = self.extractPort(from: line, for: "websocket clients") {
-                    self.natsWebsocketPort = port
+                let lines = output.split(separator: "\n", omittingEmptySubsequences: false)
+                let completedLines = lines.dropLast()
+
+                for lineSequence in completedLines {
+                    let line = String(lineSequence)
+                    state.lineCount += 1
+
+                    let errorLine = NatsServer.extracErrorMessage(from: line)
+
+                    if let port = NatsServer.extractPort(from: line, for: "client connections") {
+                        state.natsServerPort = port
+                    }
+
+                    if let port = NatsServer.extractPort(from: line, for: "websocket clients") {
+                        state.natsWebsocketPort = port
+                    }
+
+                    let ready = line.contains("Server is ready")
+
+                    if !state.tlsEnabled && NatsServer.isTLS(from: line) {
+                        state.tlsEnabled = true
+                    }
+
+                    if ready || errorLine != nil || state.lineCount >= maxLines {
+                        state.serverError = errorLine
+                        return true
+                    }
                 }
 
-                let ready = line.contains("Server is ready")
-
-                if !self.tlsEnabled && self.isTLS(from: line) {
-                    self.tlsEnabled = true
+                if output.hasSuffix("\n") {
+                    state.outputBuffer.removeAll()
+                } else {
+                    if let lastLine = lines.last, let incompleteLine = lastLine.data(using: .utf8) {
+                        state.outputBuffer = incompleteLine
+                    }
                 }
 
-                if ready || errorLine != nil || lineCount >= maxLines {
-                    serverError = errorLine
-                    semaphore.signal()
-                    outputHandle.readabilityHandler = nil
-                    return
-                }
+                return false
             }
 
-            if output.hasSuffix("\n") {
-                outputBuffer.removeAll()
-            } else {
-                if let lastLine = lines.last, let incompleteLine = lastLine.data(using: .utf8) {
-                    outputBuffer = incompleteLine
-                }
+            if done {
+                semaphore.signal()
+                outputHandle.readabilityHandler = nil
             }
         }
 
@@ -125,6 +140,14 @@ public class NatsServer {
             try process.run(), "error starting nats-server on port \(port)", file: file, line: line)
 
         let result = semaphore.wait(timeout: .now() + .seconds(10))
+
+        // Copy the values discovered by the pump back onto `self` on the calling
+        // thread, after the semaphore has established a happens-before edge.
+        let finalState = probe.withState { $0 }
+        self.natsServerPort = finalState.natsServerPort
+        self.natsWebsocketPort = finalState.natsWebsocketPort
+        self.tlsEnabled = finalState.tlsEnabled
+        let serverError = finalState.serverError
 
         XCTAssertFalse(
             result == .timedOut, "timeout waiting for server to be ready", file: file, line: line)
@@ -157,7 +180,7 @@ public class NatsServer {
         self.process = nil
     }
 
-    private func extractPort(from string: String, for phrase: String) -> Int? {
+    private static func extractPort(from string: String, for phrase: String) -> Int? {
         // Listening for websocket clients on
         // Listening for client connections on
         let pattern = "Listening for \(phrase) on .*?:(\\d+)$"
@@ -176,7 +199,7 @@ public class NatsServer {
         return nil
     }
 
-    private func extracErrorMessage(from logLine: String) -> String? {
+    private static func extracErrorMessage(from logLine: String) -> String? {
         if logLine.contains("nats-server: No such file or directory") {
             return "nats-server not found - make sure nats-server can be found in PATH"
         }
@@ -190,7 +213,7 @@ public class NatsServer {
         return String(message).trimmingCharacters(in: .whitespaces)
     }
 
-    private func isTLS(from logLine: String) -> Bool {
+    private static func isTLS(from logLine: String) -> Bool {
         return logLine.contains("TLS required for client connections")
             || logLine.contains("websocket clients on wss://")
     }
@@ -202,5 +225,33 @@ public class NatsServer {
     public enum Signal: String {
         case lameDuckMode = "ldm"
         case reload = "reload"
+    }
+}
+
+/// Thread-safe holder for the state mutated by the stdout `readabilityHandler`
+/// pump in ``NatsServer/start(port:cfg:file:line:)``. The handler is invoked on a
+/// background dispatch queue while `start()` blocks on a semaphore; every access
+/// is serialized through `lock`.
+///
+/// Marked `@unchecked Sendable` because the compiler cannot see that `lock`
+/// guards all stored state. NatsServer's own target does not depend on swift-nio,
+/// so an `NSLock`-guarded box (Foundation) is used instead of `NIOLockedValueBox`.
+private final class StartupProbe: @unchecked Sendable {
+    struct State {
+        var outputBuffer = Data()
+        var lineCount = 0
+        var serverError: String?
+        var natsServerPort: Int?
+        var natsWebsocketPort: Int?
+        var tlsEnabled = false
+    }
+
+    private let lock = NSLock()
+    private var state = State()
+
+    func withState<T>(_ body: (inout State) -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body(&state)
     }
 }

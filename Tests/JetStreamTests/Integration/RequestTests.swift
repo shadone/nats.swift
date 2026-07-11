@@ -15,7 +15,7 @@ import XCTest
 
 class RequestTests: XCTestCase {
 
-    static var allTests = [
+    nonisolated(unsafe) static let allTests = [
         ("testRequest", testRequest)
     ]
 

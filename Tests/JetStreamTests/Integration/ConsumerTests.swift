@@ -19,7 +19,7 @@ import XCTest
 
 class ConsumerTests: XCTestCase {
 
-    static var allTests = [
+    nonisolated(unsafe) static let allTests = [
         ("testFetchWithDefaultOptions", testFetchWithDefaultOptions),
         ("testFetchConsumerDeleted", testFetchConsumerDeleted),
         ("testFetchExpires", testFetchExpires),

@@ -17,7 +17,7 @@ import XCTest
 
 class ErrorsTests: XCTestCase {
 
-    static var allTests = [
+    nonisolated(unsafe) static let allTests = [
         ("testServerErrorPermissionsDenied", testServerErrorPermissionsDenied)
     ]
 

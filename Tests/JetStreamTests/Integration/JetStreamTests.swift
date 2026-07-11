@@ -20,7 +20,7 @@ import XCTest
 
 class JetStreamTests: XCTestCase {
 
-    static var allTests = [
+    nonisolated(unsafe) static let allTests = [
         ("testJetStreamContext", testJetStreamContext),
         ("testJetStreamNotEnabled", testJetStreamNotEnabled),
         ("testJetStreamNotEnabledForAccount", testJetStreamNotEnabledForAccount),

@@ -68,7 +68,11 @@ public struct KeyValueWatchOptions: Sendable {
 /// Always call ``stop()`` when finished to tear down the server-side consumer.
 /// The ``deinit`` is only a best-effort backstop for a dropped watcher; it does
 /// not replace an explicit ``stop()``.
-public final class KeyValueWatcher: AsyncSequence {
+// `@unchecked Sendable`: every stored property is an immutable Sendable value
+// except `pumpTask`, whose access is serialized by `stateLock` (mirrors
+// ``PushConsumer``). A watcher is iterated and stopped from different tasks
+// (e.g. a watchdog calling ``stop()``), so it must cross concurrency domains.
+public final class KeyValueWatcher: AsyncSequence, @unchecked Sendable {
     public typealias Element = KeyValueEntry?
 
     private let consumer: OrderedConsumer
@@ -83,6 +87,9 @@ public final class KeyValueWatcher: AsyncSequence {
 
     /// The pump task, spawned by ``start()`` only after the initial consumer
     /// creation succeeds. `nil` before ``start()`` and after a failed one.
+    /// Guarded by `stateLock` because ``start()``/``stop()`` may run on
+    /// different tasks.
+    private let stateLock = NSLock()
     private var pumpTask: Task<Void, Never>?
 
     /// Creates a watcher over `filterSubject` on the KV backing stream.
@@ -167,7 +174,8 @@ public final class KeyValueWatcher: AsyncSequence {
             continuation.finish(throwing: error)
             throw error
         }
-        pumpTask = Task { [consumer, continuation, client, bucket, ignoreDeletes, updatesOnly] in
+        let task = Task {
+            [consumer, continuation, client, bucket, ignoreDeletes, updatesOnly] in
             await KeyValueWatcher.pump(
                 consumer: consumer,
                 continuation: continuation,
@@ -176,13 +184,18 @@ public final class KeyValueWatcher: AsyncSequence {
                 ignoreDeletes: ignoreDeletes,
                 updatesOnly: updatesOnly)
         }
+        stateLock.withLockScoped { pumpTask = task }
     }
 
     /// Stops the watcher: cancels the pump, tears down the ordered consumer (and
     /// its server-side ephemeral consumer) and finishes the sequence. Idempotent.
     public func stop() async {
-        pumpTask?.cancel()
-        pumpTask = nil
+        let task = stateLock.withLockScoped { () -> Task<Void, Never>? in
+            let existing = pumpTask
+            pumpTask = nil
+            return existing
+        }
+        task?.cancel()
         await consumer.stop()
         continuation.finish()
     }
@@ -196,7 +209,8 @@ public final class KeyValueWatcher: AsyncSequence {
         // `deinit` cannot `await`, so the ordered consumer is torn down
         // fire-and-forget; failing that, the server reaps it after its
         // `inactiveThreshold`.
-        pumpTask?.cancel()
+        let task = stateLock.withLockScoped { pumpTask }
+        task?.cancel()
         continuation.finish()
         let consumer = self.consumer
         Task { await consumer.stop() }

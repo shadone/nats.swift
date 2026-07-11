@@ -18,7 +18,7 @@ import XCTest
 
 class JetStreamMessageTests: XCTestCase {
 
-    static var allTests = [
+    nonisolated(unsafe) static let allTests = [
         ("testValidOldFormatMessage", testValidOldFormatMessage),
         ("testValidNewFormatMessage", testValidNewFormatMessage),
         ("testMissingTokens", testMissingTokens),
