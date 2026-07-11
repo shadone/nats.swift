@@ -74,82 +74,11 @@ public final class ObjectStore {
     /// > - ``JetStreamError/PublishError`` if a chunk or the meta is not acknowledged.
     @discardableResult
     public func put(_ meta: ObjectMeta, data: Data) async throws -> ObjectInfo {
-        guard !meta.name.isEmpty else {
-            throw JetStreamError.ObjectStoreError.badObjectMeta
-        }
-        if meta.link != nil {
-            throw JetStreamError.ObjectStoreError.linkNotAllowed
-        }
-
-        // Resolve the chunk size, substituting the default for both nil AND an
-        // explicit 0 (nats.go object.go:647-648) -- a 0 would make the chunk loop
-        // below never advance. Normalize it back onto the meta so the persisted
-        // options always carry max_chunk_size, matching nats.go's wire form.
-        let requestedChunkSize = meta.chunkSize ?? 0
-        let resolvedChunkSize =
-            requestedChunkSize == 0 ? ObjectStoreCoding.defaultChunkSize : requestedChunkSize
-        let chunkSize = Int(resolvedChunkSize)
-        var normalizedMeta = meta
-        var normalizedOptions = meta.options ?? ObjectMetaOptions()
-        normalizedOptions.maxChunkSize = resolvedChunkSize
-        normalizedMeta.options = normalizedOptions
-        let newNuid = nextNuid()
-        let chunkSubj = ObjectStoreCoding.chunkSubject(forBucket: bucket, nuid: newNuid)
-
-        // Capture existing info so its chunks can be purged after a successful put. Not
-        // found is fine; any other error is a problem.
-        let existing: ObjectInfo?
-        do {
-            existing = try await getInfo(meta.name, showDeleted: true)
-        } catch JetStreamError.ObjectStoreError.objectNotFound {
-            existing = nil
-        }
-
-        // Stream the chunks, tracking the running digest, chunk count and total size.
-        var sent: UInt32 = 0
-        var total: UInt64 = 0
-        var hasher = SHA256()
-        var start = data.startIndex
-        while start < data.endIndex {
-            let end =
-                data.index(start, offsetBy: chunkSize, limitedBy: data.endIndex)
-                ?? data.endIndex
-            let window = data.subdata(in: start..<end)
-            do {
-                _ = try await ctx.publish(chunkSubj, message: window).wait()
-            } catch {
-                _ = try? await stream.purge(subject: chunkSubj)
-                throw error
-            }
-            hasher.update(data: window)
-            sent += 1
-            total += UInt64(window.count)
-            start = end
-        }
-
-        let digest = ObjectStoreCoding.digest(fromBytes: Data(hasher.finalize()))
-        let info = ObjectInfo(
-            meta: normalizedMeta, bucket: bucket, nuid: newNuid, size: total, chunks: sent,
-            digest: digest, modTime: ObjectStoreCoding.zeroTime)
-
-        // Publish the meta (rolling up any previous meta for this name).
-        do {
-            try await publishMeta(info)
-        } catch {
-            _ = try? await stream.purge(subject: chunkSubj)
-            throw error
-        }
-
-        // Purge the chunks of the superseded object, if any.
-        if let existing, !existing.deleted {
-            let oldChunkSubj = ObjectStoreCoding.chunkSubject(
-                forBucket: bucket, nuid: existing.nuid)
-            _ = try? await stream.purge(subject: oldChunkSubj)
-        }
-
-        var result = info
-        result.modTime = ObjectStoreCoding.nowTimestamp()
-        return result
+        // Delegate to the shared streaming core (``ObjectStoreStreaming.swift``) by feeding
+        // the whole buffer as a single-element async sequence. The core re-chunks it into
+        // the same fixed-size windows this method used to emit inline, so the wire form
+        // (chunk subjects, chunk count, digest and rolled-up meta) is byte-identical.
+        try await putStreaming(meta, source: SingleValueAsyncSequence(value: data))
     }
 
     /// Puts a byte buffer into the store under the given name.
@@ -567,7 +496,10 @@ public final class ObjectStore {
 
     /// Publishes an object's meta as a rollup message on its meta subject, storing the
     /// zero time as the modification time (the wire convention).
-    private func publishMeta(_ info: ObjectInfo) async throws {
+    ///
+    /// `internal` (not `private`) so the streaming put core in ``ObjectStoreStreaming.swift``
+    /// can share this exact rollup-publish path.
+    internal func publishMeta(_ info: ObjectInfo) async throws {
         var toStore = info
         toStore.modTime = ObjectStoreCoding.zeroTime
         let data = try ObjectStoreCoding.encodeInfo(toStore)
