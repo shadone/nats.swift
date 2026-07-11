@@ -358,6 +358,41 @@ public enum JetStreamError {
             }
         }
     }
+
+    public enum KeyValueError: JetStreamErrorProtocol {
+        case keyNotFound
+        case bucketNotFound(String)
+        case invalidKey(String)
+        case invalidBucketName(String)
+        case keyExists(String)
+        case wrongLastRevision
+        case malformedEntry(String)
+        case historyTooLarge
+        case notImplemented(String)
+
+        public var description: String {
+            switch self {
+            case .keyNotFound:
+                return "nats: key not found"
+            case .bucketNotFound(let bucket):
+                return "nats: bucket not found: \(bucket)"
+            case .invalidKey(let key):
+                return "nats: invalid key: \(key)"
+            case .invalidBucketName(let bucket):
+                return "nats: invalid bucket name: \(bucket)"
+            case .keyExists(let key):
+                return "nats: key exists: \(key)"
+            case .wrongLastRevision:
+                return "nats: wrong last revision"
+            case .malformedEntry(let cause):
+                return "nats: malformed key-value entry: \(cause)"
+            case .historyTooLarge:
+                return "nats: history limited to a max of 64 messages per key"
+            case .notImplemented(let feature):
+                return "nats: not implemented: \(feature)"
+            }
+        }
+    }
 }
 
 public struct ErrorCode: Codable, Equatable {

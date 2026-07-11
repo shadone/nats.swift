@@ -181,18 +181,25 @@ public struct AckFuture {
             throw JetStreamError.RequestError.emptyResponsePayload
         }
 
-        let ack = try decoder.decode(Response<Ack>.self, from: payload)
-        switch ack {
-        case .success(let ack):
-            return ack
-        case .error(let err):
-            if let publishErr = JetStreamError.PublishError(from: err.error) {
+        // A publish-ack error (e.g. wrong last sequence, err_code 10071) comes back
+        // as `{"error":{...},"stream":..,"seq":0}`: it carries `stream`/`seq` but no
+        // `type`, so `Response<Ack>` cannot represent it. Its success branch would
+        // mis-decode the error as an `Ack` with `seq: 0` and swallow the failure, so
+        // the error object has to be detected explicitly before decoding the ack.
+        if let pubAckErr = try? decoder.decode(PubAckError.self, from: payload),
+            let apiErr = pubAckErr.error
+        {
+            if let publishErr = JetStreamError.PublishError(from: apiErr) {
                 throw publishErr
-            } else {
-                throw err.error
             }
+            throw apiErr
         }
 
+        return try decoder.decode(Ack.self, from: payload)
+    }
+
+    private struct PubAckError: Decodable {
+        let error: JetStreamError.APIError?
     }
 }
 
