@@ -21,4 +21,34 @@ extension Data {
             .replacingOccurrences(of: "/", with: "_")
             .trimmingCharacters(in: CharacterSet(charactersIn: "="))
     }
+
+    /// Encodes the data as PADDED URL-safe base64, matching Go's `base64.URLEncoding`.
+    ///
+    /// Unlike ``base64EncodedURLSafeNotPadded()`` this KEEPS the `=` padding, which is
+    /// the encoding the JetStream object store uses for both object names
+    /// (`$O.<bucket>.M.<encodeName(name)>`) and SHA-256 digest values. Stripping the
+    /// padding — as the not-padded variant does — would break interop with nats.go, the
+    /// `nats` CLI, and every other object-store client.
+    public func base64URLPadded() -> String {
+        return self.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+    }
+
+    /// Decodes a PADDED URL-safe base64 string, matching Go's `base64.URLEncoding`.
+    ///
+    /// Reverses the URL-safe substitutions (`-` -> `+`, `_` -> `/`) and re-pads the
+    /// string to a multiple of four before decoding, so it also accepts input whose
+    /// `=` padding was stripped.
+    public init?(base64URLPadded string: String) {
+        var s =
+            string
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let remainder = s.count % 4
+        if remainder != 0 {
+            s += String(repeating: "=", count: 4 - remainder)
+        }
+        self.init(base64Encoded: s)
+    }
 }

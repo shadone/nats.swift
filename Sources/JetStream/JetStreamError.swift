@@ -421,6 +421,44 @@ public enum JetStreamError {
             }
         }
     }
+
+    public enum ObjectStoreError: JetStreamErrorProtocol {
+        case objectNotFound
+        case bucketNotFound(String)
+        case badObjectMeta
+        case digestMismatch
+        case invalidDigestFormat
+        case invalidBucketName(String)
+        case nameRequired
+        case linkNotAllowed
+        case sealed
+        case notImplemented(String)
+
+        public var description: String {
+            switch self {
+            case .objectNotFound:
+                return "nats: object not found"
+            case .bucketNotFound(let bucket):
+                return "nats: bucket not found: \(bucket)"
+            case .badObjectMeta:
+                return "nats: object-store meta information invalid"
+            case .digestMismatch:
+                return "nats: received a corrupt object, digest does not match"
+            case .invalidDigestFormat:
+                return "nats: object digest is in an invalid format"
+            case .invalidBucketName(let bucket):
+                return "nats: invalid bucket name: \(bucket)"
+            case .nameRequired:
+                return "nats: object name is required"
+            case .linkNotAllowed:
+                return "nats: link cannot be set when putting the object in bucket"
+            case .sealed:
+                return "nats: object-store is sealed"
+            case .notImplemented(let feature):
+                return "nats: not implemented: \(feature)"
+            }
+        }
+    }
 }
 
 public struct ErrorCode: Codable, Equatable, Sendable {
