@@ -66,6 +66,14 @@ enum ConsumeTestSupport {
         return client
     }
 
+    /// Connects an ADDITIONAL client to an already-running `server` without starting a new one. Used
+    /// by the deliver-group tests to bind the same push consumer from two separate connections.
+    static func connectAdditional(_ server: NatsServer) async throws -> NatsClient {
+        let client = NatsClientOptions().url(URL(string: server.clientURL)!).build()
+        try await client.connect()
+        return client
+    }
+
     /// Publishes `count` messages onto `subject`, each payload `"msg-<i>"` (1-based).
     static func publish(
         _ ctx: JetStreamContext, subject: String, count: Int

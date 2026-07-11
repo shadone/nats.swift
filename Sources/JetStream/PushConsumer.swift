@@ -27,7 +27,10 @@ import Nats
 /// > All three consumption methods share the SAME deliver-subject subscription; consume a push
 /// > consumer through one of them at a time.
 ///
-/// > Durable push consumers, queue/deliver groups and `StopAfter` are not implemented in v1.
+/// Durable push consumers and queue/deliver groups are supported: create with a
+/// ``ConsumerConfig/durable`` name to persist across restarts, and with a
+/// ``ConsumerConfig/deliverGroup`` to load-balance delivery across instances (see
+/// ``JetStreamContext/createPushConsumer(stream:cfg:)``). `StopAfter` is not implemented in v1.
 public final class PushConsumer: MessageConsuming, @unchecked Sendable {
     private let ctx: JetStreamContext
     private let deliverSubject: String
