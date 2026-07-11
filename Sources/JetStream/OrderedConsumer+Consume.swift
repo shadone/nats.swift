@@ -105,7 +105,7 @@ extension OrderedConsumer: MessageConsuming {
     }
 
     /// Iterates ordered messages as an `AsyncSequence`.
-    public nonisolated func messages() throws -> MessagesContext {
+    public nonisolated func messages() throws -> any MessagesContext {
         JetStreamMessagesContext(stream: orderedStream())
     }
 

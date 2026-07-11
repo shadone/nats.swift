@@ -70,7 +70,7 @@ extension Consumer: MessageConsuming {
     /// on the same consumer compete for its messages. Breaking the `for await` loop and releasing the
     /// returned context tears the loop down (see ``MessagesContext``); ``stop()``/``drain()`` do so
     /// eagerly.
-    public func messages() throws -> MessagesContext {
+    public func messages() throws -> any MessagesContext {
         let stream = makePullStream(
             batch: Consumer.defaultConsumeBatch,
             expires: Consumer.defaultConsumeExpires,
@@ -191,11 +191,12 @@ private final class PullMessageSource: MessageSource, @unchecked Sendable {
     }
 
     func teardown() async {
-        stateLock.lock()
-        closed = true
-        let result = current
-        current = nil
-        stateLock.unlock()
+        let result = stateLock.withLockScoped { () -> FetchResult? in
+            closed = true
+            let result = current
+            current = nil
+            return result
+        }
         await result?.cancel()
     }
 

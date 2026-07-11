@@ -14,7 +14,7 @@
 import Foundation
 
 /// `NanoTimeInterval` represents a time interval in nanoseconds, facilitating high precision time measurements.
-public struct NanoTimeInterval: Codable, Equatable {
+public struct NanoTimeInterval: Codable, Equatable, Sendable {
     /// The value of the time interval in seconds.
     var value: TimeInterval
 

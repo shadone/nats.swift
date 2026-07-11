@@ -423,7 +423,7 @@ public enum JetStreamError {
     }
 }
 
-public struct ErrorCode: Codable, Equatable {
+public struct ErrorCode: Codable, Equatable, Sendable {
     public let rawValue: UInt64
     /// Peer not a member
     public static let clusterPeerNotMember = ErrorCode(rawValue: 10040)

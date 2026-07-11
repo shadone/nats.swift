@@ -905,7 +905,7 @@ public struct StreamState: Codable {
 }
 
 /// `ClusterInfo` contains details about the cluster to which a stream belongs.
-public struct ClusterInfo: Codable {
+public struct ClusterInfo: Codable, Sendable {
     /// The name of the cluster.
     public let name: String?
 
@@ -943,7 +943,7 @@ public struct StreamSourceInfo: Codable {
 }
 
 /// `PeerInfo` provides details about the peers in a cluster that support the stream or consumer.
-public struct PeerInfo: Codable {
+public struct PeerInfo: Codable, Sendable {
     /// The server name of the peer within the cluster.
     public let name: String
 

@@ -193,7 +193,12 @@ enum KeyValueCoding {
 
     /// A shared RFC3339 formatter with fractional seconds. Immutable after
     /// configuration, so it is safe to read concurrently.
-    private static let rfc3339Formatter: ISO8601DateFormatter = {
+    ///
+    /// `nonisolated(unsafe)` because `ISO8601DateFormatter` is not `Sendable`, yet this instance is
+    /// only mutated inside the initializer closure and thereafter used read-only. Foundation's
+    /// date formatters are documented to be thread-safe for formatting/parsing once configured, so
+    /// the concurrent reads here (`string(from:)` / `date(from:)`) are race-free.
+    nonisolated(unsafe) private static let rfc3339Formatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter

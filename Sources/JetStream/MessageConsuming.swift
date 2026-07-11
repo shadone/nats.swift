@@ -53,7 +53,7 @@ public protocol MessageConsuming {
     /// ``MessagesContext/stop()`` / ``MessagesContext/drain()`` is the primary way to tear the
     /// iteration down; breaking out of the loop and releasing the context (and any iterators it
     /// produced) also tears it down as a best-effort backstop, via `deinit`.
-    func messages() throws -> MessagesContext
+    func messages() throws -> any MessagesContext
 
     /// Retrieves the next single message, waiting at most `timeout` seconds.
     ///
@@ -91,10 +91,14 @@ extension MessageConsuming {
     public func next(timeout: TimeInterval = 30) async throws -> JetStreamMessage? {
         let context = try messages()
         defer { context.stop() }
-        var iterator = context.makeAsyncIterator()
+        let iterator = context.makeAsyncIterator()
         return try await withThrowingTaskGroup(of: JetStreamMessage?.self) { group in
             group.addTask {
-                try await iterator.next()
+                // Take a local mutable copy inside the task rather than capturing the outer `var`:
+                // `JetStreamMessageIterator` is a `Sendable` value type, so the sending closure gets
+                // its own copy and the read stays confined to this child task.
+                var iterator = iterator
+                return try await iterator.next()
             }
             group.addTask {
                 try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
@@ -124,7 +128,7 @@ public protocol ConsumeContext: Sendable {
 ///
 /// Constraining ``MessagesContext``'s iterator to this single concrete type keeps
 /// `any MessagesContext` usable directly in a `for try await` loop.
-public struct JetStreamMessageIterator: AsyncIteratorProtocol {
+public struct JetStreamMessageIterator: AsyncIteratorProtocol, Sendable {
     private let pull: @Sendable () async throws -> JetStreamMessage?
 
     internal init(pull: @escaping @Sendable () async throws -> JetStreamMessage?) {

@@ -69,9 +69,7 @@ public final class PushConsumer: MessageConsuming, @unchecked Sendable {
         let resp: Response<ConsumerInfo> = try await ctx.request(subj)
         switch resp {
         case .success(let info):
-            stateLock.lock()
-            cached = info
-            stateLock.unlock()
+            stateLock.withLockScoped { cached = info }
             return info
         case .error(let apiResponse):
             throw apiResponse.error
@@ -87,7 +85,7 @@ public final class PushConsumer: MessageConsuming, @unchecked Sendable {
     }
 
     /// Iterates server-pushed messages as an `AsyncSequence`.
-    public func messages() throws -> MessagesContext {
+    public func messages() throws -> any MessagesContext {
         JetStreamMessagesContext(stream: stream())
     }
 
@@ -197,13 +195,16 @@ private final class PushMessageSource: MessageSource, @unchecked Sendable {
     }
 
     func teardown() async {
-        stateLock.lock()
-        if closed {
-            stateLock.unlock()
+        let alreadyClosed = stateLock.withLockScoped { () -> Bool in
+            if closed {
+                return true
+            }
+            closed = true
+            return false
+        }
+        if alreadyClosed {
             return
         }
-        closed = true
-        stateLock.unlock()
 
         try? await subscription.unsubscribe()
         if ownsConsumer {

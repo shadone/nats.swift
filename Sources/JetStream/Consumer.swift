@@ -83,7 +83,7 @@ public class Consumer {
 }
 
 /// `ConsumerInfo` is the detailed information about a JetStream consumer.
-public struct ConsumerInfo: Codable {
+public struct ConsumerInfo: Codable, Sendable {
     /// The name of the stream that the consumer is bound to.
     public let stream: String
 
@@ -141,7 +141,7 @@ public struct ConsumerInfo: Codable {
 }
 
 /// `ConsumerConfig` is the configuration of a JetStream consumer.
-public struct ConsumerConfig: Codable, Equatable {
+public struct ConsumerConfig: Codable, Equatable, Sendable {
     /// Optional name for the consumer.
     public var name: String?
 
@@ -327,7 +327,7 @@ public struct ConsumerConfig: Codable, Equatable {
 }
 
 /// `SequenceInfo` has both the consumer and the stream sequence and last activity.
-public struct SequenceInfo: Codable, Equatable {
+public struct SequenceInfo: Codable, Equatable, Sendable {
     /// Consumer sequence number.
     public let consumer: UInt64
 
@@ -345,7 +345,7 @@ public struct SequenceInfo: Codable, Equatable {
 }
 
 /// `DeliverPolicy` determines from which point to start delivering messages.
-public enum DeliverPolicy: String, Codable {
+public enum DeliverPolicy: String, Codable, Sendable {
     /// DeliverAllPolicy starts delivering messages from the very beginning of stream. This is the default.
     case all
 
@@ -366,7 +366,7 @@ public enum DeliverPolicy: String, Codable {
 }
 
 /// `AckPolicy` determines how the consumer should acknowledge delivered messages.
-public enum AckPolicy: String, Codable {
+public enum AckPolicy: String, Codable, Sendable {
     /// AckNonePolicy requires no acks for delivered messages./
     case none
 
@@ -378,7 +378,7 @@ public enum AckPolicy: String, Codable {
 }
 
 /// `ReplayPolicy` determines how the consumer should replay messages it already has queued in the stream.
-public enum ReplayPolicy: String, Codable {
+public enum ReplayPolicy: String, Codable, Sendable {
     /// ReplayInstantPolicy will replay messages as fast as possible./
     case instant
 
