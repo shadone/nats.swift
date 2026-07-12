@@ -23,12 +23,31 @@ import Nats
 /// by a per-message token embedded in its reply subject, and only stalls when the window is full.
 ///
 /// The subscription and its ack pump start lazily on the first publish; construction is cheap and
-/// performs no I/O. Every method is serialized by the actor; the pump calls back in via
-/// `await self.finish(...)`.
-actor JetStreamPublishAsync {
+/// performs no I/O.
+///
+/// `@unchecked Sendable`: ALL mutable state is guarded by a single `NSLock` (`lock`). This replaces an
+/// earlier `actor` implementation to remove the per-message actor hop that serialized every publish
+/// AND every ack. The discipline the actor provided for free is now maintained by hand:
+///  - A continuation is NEVER resumed while `lock` is held: each method mutates state / collects the
+///    continuations to resume into locals under the lock, releases the lock, THEN resumes them. A
+///    resume under the lock could deadlock or re-enter a locked region.
+///  - The backpressure "is the window full?" check and its action (reserve a slot OR park) happen in
+///    the SAME locked critical section (see ``tryReserveLocked(prefix:)`` / ``reserveSlot(prefix:)``),
+///    so a slot freeing between the check and the park cannot lose a wakeup.
+///  - No `await` ever happens while `lock` is held (`NSLock` is not async-aware).
+final class JetStreamPublishAsync: @unchecked Sendable {
     private let client: NatsClient
     private let timeout: TimeInterval
     private let maxPending: Int
+
+    /// Nanoseconds a reservation may live before the reaper reclaims its window slot.
+    private let timeoutNanos: UInt64
+    /// How often the shared reaper wakes to sweep expired reservations.
+    private let reaperIntervalNanos: UInt64
+
+    /// The one lock guarding EVERY mutable field below. Held only across synchronous critical
+    /// sections — never across an `await`.
+    private let lock = NSLock()
 
     private var inboxPrefix: String?
     private var sub: NatsSubscription?
@@ -49,19 +68,34 @@ actor JetStreamPublishAsync {
     private var deadlines: [String: UInt64] = [:]
     private var counter: UInt64 = 0
 
-    /// Publishers parked because the window is full; each freed slot wakes exactly one.
-    private var stallWaiters: [CheckedContinuation<Void, Never>] = []
+    /// Publishers parked because the window is full. Each is resumed with `nil` when a slot frees (a
+    /// retry signal); the woken caller loops and re-reserves under the lock. Each freed slot wakes
+    /// exactly one, and admission is always re-gated by the lock, so the window never overshoots.
+    private var stallWaiters: [StallContinuation] = []
 
     /// Waiters parked in `complete(timeout:)`, keyed by a monotonic id so both the drain path
     /// (`finish`) and the timeout path (`timeoutComplete`) can resume a specific one exactly once.
-    private var completeWaiters: [UInt64: CheckedContinuation<Void, Never>] = [:]
+    private var completeWaiters: [UInt64: CompleteContinuation] = [:]
     private var completeCounter: UInt64 = 0
     private var timedOutCompletes: Set<UInt64> = []
+
+    /// A reserved window slot: the token used to correlate the ack, the box the caller awaits, and the
+    /// fully-formed reply subject to publish under.
+    private struct Reservation {
+        let token: String
+        let box: PubAckBox
+        let reply: String
+    }
+
+    private typealias StallContinuation = CheckedContinuation<Reservation?, Never>
+    private typealias CompleteContinuation = CheckedContinuation<Void, Never>
 
     init(client: NatsClient, timeout: TimeInterval, maxPending: Int = 4000) {
         self.client = client
         self.timeout = timeout
         self.maxPending = maxPending
+        self.timeoutNanos = UInt64(timeout * 1_000_000_000)
+        self.reaperIntervalNanos = UInt64(max(1.0, timeout / 2.0) * 1_000_000_000)
     }
 
     // MARK: - Startup
@@ -70,19 +104,23 @@ actor JetStreamPublishAsync {
     /// await the SAME start task, so no publish proceeds before the subscription is live (which would
     /// otherwise drop the ack). A failed start is cleared so a later publish can retry.
     private func ensureStarted() async throws {
-        if let startTask {
-            try await startTask.value
-            return
+        // Get-or-create the shared start task atomically, then await it OUTSIDE the lock.
+        let task: Task<Void, Error> = lock.withLockScoped {
+            if let startTask {
+                return startTask
+            }
+            let created = Task { [weak self] in
+                guard let self else { return }
+                try await self.startInternal()
+            }
+            startTask = created
+            return created
         }
-        let task = Task { [weak self] in
-            guard let self else { return }
-            try await self.startInternal()
-        }
-        startTask = task
         do {
             try await task.value
         } catch {
-            startTask = nil
+            // Clear the failed start task so a later publish can retry.
+            lock.withLockScoped { startTask = nil }
             throw error
         }
     }
@@ -90,27 +128,46 @@ actor JetStreamPublishAsync {
     private func startInternal() async throws {
         let prefix = client.newInbox()
         let sub = try await client.subscribe(subject: "\(prefix).*")
-        inboxPrefix = prefix
-        self.sub = sub
-        pumpTask = Task { [weak self] in
+        let pump: Task<Void, Never> = Task { [weak self] in
             await self?.pump(sub: sub, prefix: prefix)
         }
         // One shared reaper (not a timer per message): periodically fail boxes past their deadline.
-        let interval = UInt64(max(1.0, timeout / 2.0) * 1_000_000_000)
-        reaperTask = Task { [weak self] in
+        let interval = reaperIntervalNanos
+        let reaper: Task<Void, Never> = Task { [weak self] in
             while true {
                 try? await Task.sleep(nanoseconds: interval)
-                guard let self, await self.reapExpired() else { return }
+                guard let self, self.reapExpired() else { return }
             }
+        }
+        // Publish all four fields in one critical section so no method observes a half-started state.
+        // If `shutdown()` ran while we were suspended in `subscribe` above, do NOT install a
+        // subscription/pump/reaper it already tore past — tear down what we just created instead, so a
+        // shutdown during first-publish startup can't resurrect and leak a live ack pump.
+        let installed: Bool = lock.withLockScoped {
+            if isShutdown { return false }
+            inboxPrefix = prefix
+            self.sub = sub
+            pumpTask = pump
+            reaperTask = reaper
+            return true
+        }
+        if !installed {
+            pump.cancel()
+            reaper.cancel()
+            try? await sub.unsubscribe()
         }
     }
 
     /// Fails every box whose deadline has passed (reclaiming its window slot). Returns `false` once the
-    /// publisher is shut down, ending the reaper loop.
+    /// publisher is shut down, ending the reaper loop. Tokens are collected under the lock; the actual
+    /// `finish` calls run OUTSIDE it (each re-takes the lock and is resolve-once).
     private func reapExpired() -> Bool {
-        if isShutdown { return false }
         let now = DispatchTime.now().uptimeNanoseconds
-        let expired = deadlines.filter { $0.value <= now }.map(\.key)
+        let expired: [String]? = lock.withLockScoped {
+            if isShutdown { return nil }
+            return deadlines.filter { $0.value <= now }.map(\.key)
+        }
+        guard let expired else { return false }
         for token in expired {
             finish(token, .failure(JetStreamError.RequestError.timeout))
         }
@@ -126,7 +183,7 @@ actor JetStreamPublishAsync {
         msgTTL: NanoTimeInterval? = nil
     ) async throws -> PubAckFuture {
         try await ensureStarted()
-        guard let prefix = inboxPrefix else {
+        guard let prefix = lock.withLockScoped({ inboxPrefix }) else {
             throw NatsError.ClientError.internalError("publishAsync subscription not started")
         }
 
@@ -138,33 +195,72 @@ actor JetStreamPublishAsync {
             headers = withTTL
         }
 
-        // Backpressure: park while the in-flight window is full. Each awaited freed slot re-checks the
-        // condition, so a burst of freed slots cannot let more than `maxPending` through.
-        while acks.count >= maxPending {
-            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                stallWaiters.append(cont)
-            }
+        // Backpressure: reserve a window slot (allocating token + box + deadline atomically with the
+        // window check), parking while the window is full. Never lets more than `maxPending` through.
+        let reservation = await reserveSlot(prefix: prefix)
+
+        do {
+            try await client.publish(
+                message, subject: subject, reply: reservation.reply, headers: headers)
+        } catch {
+            // A send failure both resolves the box and is surfaced to the caller.
+            finish(reservation.token, .failure(error))
+            throw error
         }
 
+        return PubAckFuture(box: reservation.box)
+    }
+
+    /// Reserves a window slot, parking the caller while the window is full.
+    ///
+    /// The reserve-or-park decision is made ATOMICALLY under the lock: either a slot is free (allocate
+    /// and return it) or the caller is appended to `stallWaiters` in the SAME critical section — so a
+    /// slot freeing between "check" and "park" cannot be lost. A parked caller is later resumed with
+    /// `nil` (by `finish`/`failEverything`) and loops to re-reserve; admission is re-gated by the lock
+    /// on every attempt, so the window never overshoots `maxPending`.
+    private func reserveSlot(prefix: String) async -> Reservation {
+        // Fast path: reserve immediately with NO continuation/suspension when the window has room.
+        if let immediate = lock.withLockScoped({ tryReserveLocked(prefix: prefix) }) {
+            return immediate
+        }
+        // Slow path: window full — park, and retry each time a slot is handed to us.
+        while true {
+            let reserved: Reservation? = await withCheckedContinuation {
+                (cont: StallContinuation) in
+                let immediate: Reservation? = lock.withLockScoped {
+                    if let reservation = tryReserveLocked(prefix: prefix) {
+                        return reservation
+                    }
+                    // Window full: park this caller. `finish` resumes it with `nil` to retry.
+                    stallWaiters.append(cont)
+                    return nil
+                }
+                if let immediate {
+                    cont.resume(returning: immediate)
+                }
+                // else parked; resumed later with `nil` → the loop retries.
+            }
+            if let reserved {
+                return reserved
+            }
+        }
+    }
+
+    /// MUST hold `lock`. Allocates a token + box + deadline and returns the reservation when the window
+    /// has room OR the publisher is shutting down (so a woken publisher always makes progress to a
+    /// publish that then fails on the dead connection, rather than parking forever). Returns `nil` when
+    /// the window is full and the caller should park.
+    private func tryReserveLocked(prefix: String) -> Reservation? {
+        guard isShutdown || acks.count < maxPending else { return nil }
         counter += 1
         let token = String(counter)
-        let reply = "\(prefix).\(token)"
         let box = PubAckBox()
         acks[token] = box
         // Record an expiry deadline reclaimed by the shared reaper (no per-message timer task). While
         // connected the ack normally resolves the box first; the deadline only bounds the pathological
         // case where a frame is buffered-but-not-delivered across a reconnect and no reply ever comes.
-        deadlines[token] = DispatchTime.now().uptimeNanoseconds + UInt64(timeout * 1_000_000_000)
-
-        do {
-            try await client.publish(message, subject: subject, reply: reply, headers: headers)
-        } catch {
-            // A send failure both resolves the box and is surfaced to the caller.
-            finish(token, .failure(error))
-            throw error
-        }
-
-        return PubAckFuture(box: box)
+        deadlines[token] = DispatchTime.now().uptimeNanoseconds + timeoutNanos
+        return Reservation(token: token, box: box, reply: "\(prefix).\(token)")
     }
 
     // MARK: - Ack pump
@@ -189,47 +285,55 @@ actor JetStreamPublishAsync {
     // MARK: - Resolution
 
     /// Resolves the box for `token` exactly once (guarded by `removeValue`), clears its deadline, wakes
-    /// one stalled publisher, and signals completion waiters once the window fully drains.
+    /// one stalled publisher, and signals completion waiters once the window fully drains. State is
+    /// mutated and the continuations to resume are collected under the lock; the box resolve and all
+    /// continuation resumes happen OUTSIDE the lock.
     private func finish(_ token: String, _ result: Result<Ack, Error>) {
-        guard let box = acks.removeValue(forKey: token) else { return }
-        deadlines.removeValue(forKey: token)
+        let work: (PubAckBox, StallContinuation?, [CompleteContinuation])? = lock.withLockScoped {
+            guard let box = acks.removeValue(forKey: token) else { return nil }
+            deadlines.removeValue(forKey: token)
+            // A slot just freed: wake exactly one parked publisher (it re-reserves under the lock).
+            let stall = stallWaiters.popLast()
+            var completers: [CompleteContinuation] = []
+            if acks.isEmpty && !completeWaiters.isEmpty {
+                completers = Array(completeWaiters.values)
+                completeWaiters.removeAll()
+            }
+            return (box, stall, completers)
+        }
+        guard let (box, stall, completers) = work else { return }
         box.resolve(result)
-
-        // A slot just freed: wake exactly one parked publisher.
-        stallWaiters.popLast()?.resume()
-
-        if acks.isEmpty {
-            drainCompleteWaiters()
+        stall?.resume(returning: nil)
+        for completer in completers {
+            completer.resume()
         }
     }
 
     /// Fails every in-flight box AND wakes every parked publisher / completion waiter — used when the
     /// pump ends (connection close) or on shutdown, so NOTHING is left suspended: not the boxes, not a
-    /// backpressure-stalled `publishAsync`, not a parked `complete(timeout:)`. Idempotent.
+    /// backpressure-stalled `publishAsync`, not a parked `complete(timeout:)`. Idempotent. All resumes
+    /// happen OUTSIDE the lock.
     private func failEverything(_ error: Error) {
-        let pending = acks
-        acks.removeAll()
-        deadlines.removeAll()
-        for (_, box) in pending {
+        let work: ([PubAckBox], [StallContinuation], [CompleteContinuation]) = lock.withLockScoped {
+            let boxes = Array(acks.values)
+            acks.removeAll()
+            deadlines.removeAll()
+            let stalled = stallWaiters
+            stallWaiters.removeAll()
+            let completers = Array(completeWaiters.values)
+            completeWaiters.removeAll()
+            return (boxes, stalled, completers)
+        }
+        for box in work.0 {
             box.resolve(.failure(error))
         }
-        // Wake every backpressure-parked publisher: the window is now empty, so each re-checks the
-        // condition and proceeds (its own publish will then fail on the dead connection). Without this,
-        // a publisher parked in the window when the connection closed would hang forever.
-        let stalled = stallWaiters
-        stallWaiters.removeAll()
-        for cont in stalled {
-            cont.resume()
+        // Wake every backpressure-parked publisher: the window is now empty, so each re-reserves and
+        // proceeds (its own publish then fails on the dead connection). Without this, a publisher
+        // parked when the connection closed would hang forever.
+        for cont in work.1 {
+            cont.resume(returning: nil)
         }
-        drainCompleteWaiters()
-    }
-
-    /// Resumes all drain-parked `complete(timeout:)` waiters (the window reached empty).
-    private func drainCompleteWaiters() {
-        guard !completeWaiters.isEmpty else { return }
-        let waiters = completeWaiters
-        completeWaiters.removeAll()
-        for (_, cont) in waiters {
+        for cont in work.2 {
             cont.resume()
         }
     }
@@ -237,7 +341,11 @@ actor JetStreamPublishAsync {
     // MARK: - Introspection / flush
 
     /// Number of acks currently in flight (published but not yet acked/failed/timed out).
-    func pending() -> Int { acks.count }
+    ///
+    /// `async` only to preserve the call-site signature the actor exposed (the body never suspends).
+    func pending() async -> Int {
+        lock.withLockScoped { acks.count }
+    }
 
     /// Awaits until every in-flight publish has been acked/failed, or throws
     /// ``JetStreamError/RequestError/timeout`` if that takes longer than `timeout`.
@@ -245,35 +353,50 @@ actor JetStreamPublishAsync {
     /// A drain (`finish` reaching an empty window) and the sleeper race, but both resume the SAME
     /// keyed continuation and each path removes the key first, so it is resumed exactly once.
     func complete(timeout: TimeInterval) async throws {
-        if acks.isEmpty { return }
+        if lock.withLockScoped({ acks.isEmpty }) { return }
 
-        completeCounter += 1
-        let id = completeCounter
+        let id: UInt64 = lock.withLockScoped {
+            completeCounter += 1
+            return completeCounter
+        }
 
         let sleeper = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-            await self?.timeoutComplete(id: id)
+            self?.timeoutComplete(id: id)
         }
 
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            // No `await` happened since the `acks.isEmpty` guard, so the window cannot have drained
-            // underneath us; park unconditionally.
-            completeWaiters[id] = cont
+        await withCheckedContinuation { (cont: CompleteContinuation) in
+            // Re-check the window UNDER the lock, atomically with parking: unlike the actor version,
+            // the lock was released after the `acks.isEmpty` fast-path above, so `finish` could have
+            // drained the window in between. Parking unconditionally here would lose that wakeup.
+            let resumeNow: Bool = lock.withLockScoped {
+                if acks.isEmpty {
+                    return true
+                }
+                completeWaiters[id] = cont
+                return false
+            }
+            if resumeNow {
+                cont.resume()
+            }
         }
 
         sleeper.cancel()
 
-        if timedOutCompletes.remove(id) != nil {
+        if lock.withLockScoped({ timedOutCompletes.remove(id) != nil }) {
             throw JetStreamError.RequestError.timeout
         }
     }
 
     /// Timeout path for `complete(timeout:)`: resume the still-parked waiter (if any) and mark it as
-    /// timed out so the awaiting call throws.
+    /// timed out so the awaiting call throws. Resolve-once via `removeValue`; resumes outside the lock.
     private func timeoutComplete(id: UInt64) {
-        guard let cont = completeWaiters.removeValue(forKey: id) else { return }
-        timedOutCompletes.insert(id)
-        cont.resume()
+        let cont: CompleteContinuation? = lock.withLockScoped {
+            guard let cont = completeWaiters.removeValue(forKey: id) else { return nil }
+            timedOutCompletes.insert(id)
+            return cont
+        }
+        cont?.resume()
     }
 
     // MARK: - Teardown
@@ -281,19 +404,28 @@ actor JetStreamPublishAsync {
     /// Unsubscribes, cancels the pump and reaper, fails every pending box, and wakes any parked
     /// publishers/completers so nothing hangs. Idempotent.
     func shutdown() async {
-        if isShutdown { return }
-        isShutdown = true
+        // Flip the shutdown flag and detach the tasks/subscription in one critical section. A `nil`
+        // result means we were already shut down — nothing more to do.
+        let teardown: (Task<Void, Never>?, Task<Void, Never>?, NatsSubscription?)? =
+            lock.withLockScoped {
+                if isShutdown { return nil }
+                isShutdown = true
+                let pump = pumpTask
+                pumpTask = nil
+                let reaper = reaperTask
+                reaperTask = nil
+                let subToClose = sub
+                sub = nil
+                return (pump, reaper, subToClose)
+            }
+        guard let (pump, reaper, subToClose) = teardown else { return }
 
-        pumpTask?.cancel()
-        pumpTask = nil
-        reaperTask?.cancel()
-        reaperTask = nil
+        pump?.cancel()
+        reaper?.cancel()
 
         // Fails all boxes and wakes every stalled publisher + parked completer.
         failEverything(NatsError.ClientError.connectionClosed)
 
-        let subToClose = sub
-        sub = nil
         if let subToClose {
             try? await subToClose.unsubscribe()
         }
@@ -326,18 +458,18 @@ extension JetStreamContext {
         _ subject: String, message: Data, headers: NatsHeaderMap? = nil,
         msgTTL: NanoTimeInterval? = nil
     ) async throws -> PubAckFuture {
-        try await publishAsyncActor.publishAsync(
+        try await asyncPublisher.publishAsync(
             subject, message: message, headers: headers, msgTTL: msgTTL)
     }
 
     /// Number of async publishes currently in flight (published but not yet acked/failed/timed out).
     public func publishAsyncPending() async -> Int {
-        await publishAsyncActor.pending()
+        await asyncPublisher.pending()
     }
 
     /// Awaits until all in-flight async publishes have resolved, or throws
     /// ``JetStreamError/RequestError/timeout`` after `timeout` seconds.
     public func publishAsyncComplete(timeout: TimeInterval = 30) async throws {
-        try await publishAsyncActor.complete(timeout: timeout)
+        try await asyncPublisher.complete(timeout: timeout)
     }
 }

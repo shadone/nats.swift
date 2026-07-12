@@ -33,6 +33,8 @@ func runScenario(
     case "reqReply": return try await runReqReply(nats: nats, config: config)
     case "jsPublish": return try await runJsPublish(nats: nats, js: js, config: config)
     case "jsPublishAsync": return try await runJsPublishAsync(nats: nats, js: js, config: config)
+    case "jsPublishAsyncConc":
+        return try await runJsPublishAsyncConcurrent(nats: nats, js: js, config: config)
     case "kvPutGet": return try await runKvPutGet(js: js, config: config)
     case "objPutGet": return try await runObjPutGet(js: js, config: config)
     case "pullConsume": return try await runPullConsume(nats: nats, js: js, config: config)
@@ -241,6 +243,52 @@ func runJsPublishAsync(
             name: "jsPublishAsync", count: count, payloadSize: config.size,
             elapsedMs: millis(fromNanos: elapsed),
             metrics: [Metric(label: "msgs/sec", value: Double(count) / secs)])
+    } cleanup: {
+        try? await js.deleteStream(name: stream)
+    }
+}
+
+/// Async publish fired from 8 CONCURRENT tasks (not one sequential loop). This is where a lock-based
+/// publisher can beat an actor-based one: the actor serializes all callers onto one executor, while a
+/// lock lets the fast-path reservation run concurrently.
+func runJsPublishAsyncConcurrent(
+    nats: NatsClient, js: JetStreamContext, config: Config
+) async throws -> ScenarioResult {
+    let count = jetStreamCount(config)
+    let workers = 8
+    let per = count / workers
+    let token = uniqueToken()
+    let stream = "perf_jsac_\(token)"
+    let subject = "perf.jsac.\(token)"
+    let payload = Data(count: config.size)
+
+    _ = try await js.createStream(cfg: StreamConfig(name: stream, subjects: [subject]))
+    return try await withCleanup {
+        for _ in 0..<warmupCount(count) {
+            _ = try await js.publishAsync(subject, message: payload)
+        }
+        try await js.publishAsyncComplete(timeout: 60)
+
+        let start = DispatchTime.now().uptimeNanoseconds
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for _ in 0..<workers {
+                group.addTask {
+                    for _ in 0..<per {
+                        _ = try await js.publishAsync(subject, message: payload)
+                    }
+                }
+            }
+            try await group.waitForAll()
+        }
+        try await js.publishAsyncComplete(timeout: 60)
+        let elapsed = DispatchTime.now().uptimeNanoseconds - start
+
+        let total = per * workers
+        let secs = seconds(fromNanos: elapsed)
+        return ScenarioResult(
+            name: "jsPublishAsyncConc", count: total, payloadSize: config.size,
+            elapsedMs: millis(fromNanos: elapsed),
+            metrics: [Metric(label: "msgs/sec", value: Double(total) / secs)])
     } cleanup: {
         try? await js.deleteStream(name: stream)
     }

@@ -38,7 +38,7 @@ public final class JetStreamContext: @unchecked Sendable {
     /// ``publishAsync(_:message:headers:msgTTL:)``, which lazily starts the subscription and pump.
     /// The reaper's expiry bound is captured from the context timeout at construction time and does
     /// not track later ``setTimeout(_:)`` changes.
-    internal let publishAsyncActor: JetStreamPublishAsync
+    internal let asyncPublisher: JetStreamPublishAsync
 
     /// Creates a JetStreamContext from ``NatsClient`` with optional custom prefix and timeout.
     ///
@@ -50,7 +50,7 @@ public final class JetStreamContext: @unchecked Sendable {
         self.client = client
         self.prefix = prefix
         self._timeout = timeout
-        self.publishAsyncActor = JetStreamPublishAsync(client: client, timeout: timeout)
+        self.asyncPublisher = JetStreamPublishAsync(client: client, timeout: timeout)
     }
 
     /// Creates a JetStreamContext from ``NatsClient`` with custom domain and timeout.
@@ -63,7 +63,7 @@ public final class JetStreamContext: @unchecked Sendable {
         self.client = client
         self.prefix = "$JS.\(domain).API"
         self._timeout = timeout
-        self.publishAsyncActor = JetStreamPublishAsync(client: client, timeout: timeout)
+        self.asyncPublisher = JetStreamPublishAsync(client: client, timeout: timeout)
     }
 
     /// Creates a JetStreamContext from ``NatsClient``
@@ -74,7 +74,7 @@ public final class JetStreamContext: @unchecked Sendable {
         self.client = client
         self.prefix = "$JS.API"
         self._timeout = 5.0
-        self.publishAsyncActor = JetStreamPublishAsync(client: client, timeout: 5.0)
+        self.asyncPublisher = JetStreamPublishAsync(client: client, timeout: 5.0)
     }
 
     /// Sets a custom timeout for JetStream API requests.
@@ -84,8 +84,9 @@ public final class JetStreamContext: @unchecked Sendable {
 
     deinit {
         // Tear down the batched-publish subscription/pump best-effort. `deinit` is nonisolated, so
-        // fire-and-forget onto the actor; the `Task` retains the (Sendable) actor long enough to run.
-        let pub = publishAsyncActor
+        // fire-and-forget the async `shutdown()`; the `Task` retains the (Sendable) publisher long
+        // enough to run.
+        let pub = asyncPublisher
         Task { await pub.shutdown() }
     }
 }

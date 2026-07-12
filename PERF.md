@@ -99,11 +99,15 @@ validation and ignore-on-failure behavior).
   delivery path, so it is deferred as higher-risk / lower-value: KV/Object watch
   (the ordered engine's primary use) reads `natsMessages` directly — the faster
   single-queue path — and is inherently low-throughput.
-- **Async publish ~42k msgs/s** — `publishAsync` (batched, bounded window) is ~2.8×
-  the sync `publish().wait()` but is bounded by per-message actor serialization on
-  both the send and ack paths. A lock-based (non-actor) publisher — matching how
-  nats.go's async publish avoids an async hop per message — could push it
-  substantially higher, at the cost of more manual concurrency.
+- **Async publish ~42–44k msgs/s** — `publishAsync` (batched, bounded window) is
+  ~2.8× the sync `publish().wait()`. It is bounded by the send/ack pipeline and the
+  in-flight window (4000), NOT by the publisher's serialization mechanism: a
+  head-to-head A/B of an actor-based vs a single-lock publisher showed the lock
+  version ~10% faster sequentially, ~17% faster with concurrent producers, and far
+  more consistent (CV ~4% vs ~27%) — a real but modest win that confirmed the
+  bottleneck is the pipeline, not the actor hop. The lock version is what ships.
+  Raising the window or pipelining the connection write path would move throughput
+  more than any change to the publisher's locking.
 - **Overlapping pulls** — the pull loop still fetches the next batch only once the
   current one drains, leaving a round-trip gap between batches. With the
   per-message cost gone this is a minor remaining factor; an overlapping-pull
