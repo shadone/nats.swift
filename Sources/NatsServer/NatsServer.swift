@@ -34,6 +34,12 @@ public class NatsServer {
         }
     }
 
+    /// The JetStream store directory of the most recent ``start(port:cfg:storeDir:file:line:)``.
+    /// Capture it after the first start and pass it back to a later `start` (on the same port) to
+    /// restart the server with its JetStream state — streams, consumers, KV/Object buckets and
+    /// file-backed messages — preserved, as needed to exercise client reconnect-and-resume.
+    public private(set) var storeDirectory: String?
+
     private var process: Process?
     private var natsServerPort: Int?
     private var natsWebsocketPort: Int?
@@ -44,7 +50,8 @@ public class NatsServer {
 
     // TODO: When implementing JetStream, creating and deleting store dir should be handled in start/stop methods
     public func start(
-        port: Int = -1, cfg: String? = nil, file: StaticString = #file, line: UInt = #line
+        port: Int = -1, cfg: String? = nil, storeDir: String? = nil,
+        file: StaticString = #file, line: UInt = #line
     ) {
         XCTAssertNil(
             self.process, "nats-server is already running on port \(port)", file: file, line: line)
@@ -54,12 +61,17 @@ public class NatsServer {
         let fileManager = FileManager.default
         pidFile = fileManager.temporaryDirectory.appendingPathComponent("nats-server.pid")
 
-        let tempDir = FileManager.default.temporaryDirectory.appending(component: UUID().uuidString)
+        // A caller-supplied `storeDir` reuses an existing store (restart-with-persistence); otherwise
+        // a fresh per-start directory keeps unrelated tests isolated, as before.
+        let resolvedStoreDir =
+            storeDir
+            ?? FileManager.default.temporaryDirectory.appending(component: UUID().uuidString).path
+        self.storeDirectory = resolvedStoreDir
 
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = [
             "nats-server", "-p", "\(port)", "-P", pidFile!.path, "--store_dir",
-            tempDir.path,
+            resolvedStoreDir,
         ]
         if let cfg {
             process.arguments?.append(contentsOf: ["-c", cfg])
