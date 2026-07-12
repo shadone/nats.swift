@@ -36,7 +36,10 @@ public struct ObjectResult {
 /// `delete`. Objects larger than a chunk are split into `$O.<bucket>.C.<nuid>` chunk
 /// messages and reassembled on read; their SHA-256 digest is verified against the stored
 /// meta on every `get`.
-public final class ObjectStore {
+///
+/// An `ObjectStore` handle is `Sendable`: its stored state is all immutable and its backing
+/// ``Stream`` is thread-safe, so a single handle can be shared across concurrent tasks.
+public final class ObjectStore: Sendable {
 
     /// The name of the bucket.
     public let bucket: String

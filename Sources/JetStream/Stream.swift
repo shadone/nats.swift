@@ -12,6 +12,7 @@
 // limitations under the License.
 
 import Foundation
+import NIOConcurrencyHelpers
 import Nats
 
 /// Representation of a JetStream Stream, exposing ``StreamInfo`` and operations on a stream.
@@ -22,17 +23,27 @@ import Nats
 /// - deleting messages from a stream
 /// - purging a stream
 /// - operating on Consumers
-public class Stream {
+///
+/// `@unchecked Sendable`: `ctx` is a `Sendable` ``JetStreamContext`` and the only mutable state is
+/// `info`, guarded by a `NIOLockedValueBox`. Every read and write is serialized (the lock is never
+/// held across an `await`), so a `Stream` — and the ``KeyValue``/``ObjectStore`` handles that hold
+/// one — can be shared across concurrency domains data-race-free.
+public final class Stream: @unchecked Sendable {
+
+    private let _info: NIOLockedValueBox<StreamInfo>
 
     /// Contains information about the stream.
     /// Note that this may be out of date and reading it does not query the server.
     /// For up-to-date stream info use ``Stream/info()``
-    public internal(set) var info: StreamInfo
+    public internal(set) var info: StreamInfo {
+        get { _info.withLockedValue { $0 } }
+        set { _info.withLockedValue { $0 = newValue } }
+    }
     internal let ctx: JetStreamContext
 
     init(ctx: JetStreamContext, info: StreamInfo) {
         self.ctx = ctx
-        self.info = info
+        self._info = NIOLockedValueBox(info)
     }
 
     /// Retrieves information about the stream
@@ -407,7 +418,7 @@ public class Stream {
 }
 
 /// `StreamInfo` contains details about the configuration and state of a stream within JetStream.
-public struct StreamInfo: Codable {
+public struct StreamInfo: Codable, Sendable {
     /// The configuration settings of the stream, set upon creation or update.
     public let config: StreamConfig
 
@@ -436,7 +447,7 @@ public struct StreamInfo: Codable {
 }
 
 /// `StreamConfig` defines the configuration for a JetStream stream.
-public struct StreamConfig: Codable, Equatable {
+public struct StreamConfig: Codable, Equatable, Sendable {
     /// The name of the stream, required and must be unique across the JetStream account.
     public let name: String
 
@@ -695,7 +706,7 @@ public struct StreamConfig: Codable, Equatable {
 }
 
 /// `RetentionPolicy` determines how messages in a stream are retained.
-public enum RetentionPolicy: String, Codable {
+public enum RetentionPolicy: String, Codable, Sendable {
     /// Messages are retained until any given limit is reached (MaxMsgs, MaxBytes or MaxAge).
     case limits
 
@@ -707,7 +718,7 @@ public enum RetentionPolicy: String, Codable {
 }
 
 /// `DiscardPolicy` determines how to proceed when limits of messages or bytes are reached.
-public enum DiscardPolicy: String, Codable {
+public enum DiscardPolicy: String, Codable, Sendable {
     /// Remove older messages to return to the limits.
     case old
 
@@ -716,7 +727,7 @@ public enum DiscardPolicy: String, Codable {
 }
 
 /// `StorageType` determines how messages are stored for retention.
-public enum StorageType: String, Codable {
+public enum StorageType: String, Codable, Sendable {
     /// Messages are stored on disk.
     case file
 
@@ -725,7 +736,7 @@ public enum StorageType: String, Codable {
 }
 
 /// `Placement` guides the placement of streams in clustered JetStream.
-public struct Placement: Codable, Equatable {
+public struct Placement: Codable, Equatable, Sendable {
     /// Tags used to match streams to servers in the cluster.
     public var tags: [String]?
 
@@ -739,7 +750,7 @@ public struct Placement: Codable, Equatable {
 }
 
 /// `StreamSource` defines how streams can source from other streams.
-public struct StreamSource: Codable, Equatable {
+public struct StreamSource: Codable, Equatable, Sendable {
     /// Name of the stream to source from.
     public let name: String
 
@@ -782,7 +793,7 @@ public struct StreamSource: Codable, Equatable {
 }
 
 /// `ExternalStream` qualifies access to a stream source in another account or JetStream domain.
-public struct ExternalStream: Codable, Equatable {
+public struct ExternalStream: Codable, Equatable, Sendable {
 
     /// Subject prefix for importing API subjects.
     public let apiPrefix: String
@@ -802,7 +813,7 @@ public struct ExternalStream: Codable, Equatable {
 }
 
 /// `StoreCompression` specifies the message storage compression algorithm.
-public enum StoreCompression: String, Codable {
+public enum StoreCompression: String, Codable, Sendable {
     /// No compression is applied.
     case none
 
@@ -811,7 +822,7 @@ public enum StoreCompression: String, Codable {
 }
 
 /// `SubjectTransformConfig` configures subject transformations for incoming messages.
-public struct SubjectTransformConfig: Codable, Equatable {
+public struct SubjectTransformConfig: Codable, Equatable, Sendable {
     /// Subject pattern to match incoming messages.
     public let source: String
 
@@ -830,7 +841,7 @@ public struct SubjectTransformConfig: Codable, Equatable {
 }
 
 /// `RePublish` configures republishing of messages once they are committed to a stream.
-public struct RePublish: Codable, Equatable {
+public struct RePublish: Codable, Equatable, Sendable {
     /// Subject pattern to match incoming messages.
     public let source: String?
 
@@ -854,7 +865,7 @@ public struct RePublish: Codable, Equatable {
 }
 
 /// `StreamConsumerLimits` defines the limits for a consumer on a stream.
-public struct StreamConsumerLimits: Codable, Equatable {
+public struct StreamConsumerLimits: Codable, Equatable, Sendable {
     /// Duration to clean up the consumer if inactive.
     public var inactiveThreshold: NanoTimeInterval?
 
@@ -873,7 +884,7 @@ public struct StreamConsumerLimits: Codable, Equatable {
 }
 
 /// `StreamState` represents the state of a JetStream stream at the time of the request.
-public struct StreamState: Codable {
+public struct StreamState: Codable, Sendable {
     /// Number of messages stored in the stream.
     public let messages: UInt64
 
@@ -935,7 +946,7 @@ public struct ClusterInfo: Codable, Sendable {
 }
 
 /// `StreamSourceInfo` provides information about an upstream stream source or mirror.
-public struct StreamSourceInfo: Codable {
+public struct StreamSourceInfo: Codable, Sendable {
     /// The name of the stream that is being replicated or mirrored.
     public let name: String
 
@@ -1007,7 +1018,7 @@ internal struct GetMessageResp: Codable {
 }
 
 /// Represents a message persisted on a stream.
-public struct StreamMessage {
+public struct StreamMessage: Sendable {
 
     /// Subject of the message.
     public let subject: String

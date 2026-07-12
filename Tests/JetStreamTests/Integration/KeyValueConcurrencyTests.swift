@@ -45,21 +45,20 @@ final class KeyValueConcurrencyTests: XCTestCase {
         let workers = 8
         let increments = 50
 
-        // `KeyValue` is not `Sendable`, so each worker opens its own handle over the same bucket
-        // from the `Sendable` context rather than capturing the shared one.
+        // `KeyValue` is `Sendable`, so a single shared handle is captured by every worker rather
+        // than each worker opening its own. This capture is exactly what Swift 6 used to reject.
         try await withThrowingTaskGroup(of: Void.self) { group in
             for _ in 0..<workers {
                 group.addTask {
-                    let workerKv = try await ctx.keyValue(bucket: bucket)
                     for _ in 0..<increments {
                         var attempts = 0
                         while true {
                             attempts += 1
                             XCTAssertLessThan(attempts, 100_000, "runaway CAS retry")
-                            let entry = try await workerKv.get("n")!
+                            let entry = try await kv.get("n")!
                             let current = Int(String(decoding: entry.value, as: UTF8.self))!
                             do {
-                                _ = try await workerKv.update(
+                                _ = try await kv.update(
                                     "n", "\(current + 1)".data(using: .utf8)!,
                                     revision: entry.revision)
                                 break
@@ -87,18 +86,18 @@ final class KeyValueConcurrencyTests: XCTestCase {
         let ctx = JetStreamContext(client: client)
 
         let bucket = "race"
-        _ = try await ctx.createKeyValue(cfg: KeyValueConfig(bucket: bucket))
+        let kv = try await ctx.createKeyValue(cfg: KeyValueConfig(bucket: bucket))
 
         let workers = 16
         let tally = Tally()
 
-        // Each worker opens its own (non-`Sendable`) `KeyValue` handle from the `Sendable` context.
+        // A single shared `Sendable` `KeyValue` handle is captured by every worker; the capture
+        // is exactly what Swift 6 used to reject before the handle became `Sendable`.
         await withTaskGroup(of: Void.self) { group in
             for i in 0..<workers {
                 group.addTask {
                     do {
-                        let workerKv = try await ctx.keyValue(bucket: bucket)
-                        _ = try await workerKv.create("k", "\(i)".data(using: .utf8)!)
+                        _ = try await kv.create("k", "\(i)".data(using: .utf8)!)
                         await tally.recordSuccess()
                     } catch {
                         await tally.recordFailure()

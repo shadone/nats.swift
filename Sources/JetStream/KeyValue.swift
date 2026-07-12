@@ -24,7 +24,10 @@ import Nats
 /// This exposes value access (`get`), writes (`put`, `create`, `update`),
 /// tombstones (`delete`, `purge`), `status`, and the consumer-based operations
 /// `watch`, `watchAll`, `keys`, `history` and `purgeDeletes`.
-public final class KeyValue {
+///
+/// A `KeyValue` handle is `Sendable`: its stored state is all immutable and its backing
+/// ``Stream`` is thread-safe, so a single handle can be shared across concurrent tasks.
+public final class KeyValue: Sendable {
 
     /// The name of the bucket.
     public let bucket: String
