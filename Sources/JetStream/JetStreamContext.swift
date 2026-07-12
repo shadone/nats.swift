@@ -33,6 +33,13 @@ public final class JetStreamContext: @unchecked Sendable {
         timeoutLock.withLockScoped { _timeout }
     }
 
+    /// Owns the shared batched-publish machinery (one wildcard ack subscription + a bounded
+    /// in-flight window). Constructed eagerly and cheaply here — no I/O happens until the first
+    /// ``publishAsync(_:message:headers:msgTTL:)``, which lazily starts the subscription and pump.
+    /// The reaper's expiry bound is captured from the context timeout at construction time and does
+    /// not track later ``setTimeout(_:)`` changes.
+    internal let publishAsyncActor: JetStreamPublishAsync
+
     /// Creates a JetStreamContext from ``NatsClient`` with optional custom prefix and timeout.
     ///
     /// - Parameters:
@@ -43,6 +50,7 @@ public final class JetStreamContext: @unchecked Sendable {
         self.client = client
         self.prefix = prefix
         self._timeout = timeout
+        self.publishAsyncActor = JetStreamPublishAsync(client: client, timeout: timeout)
     }
 
     /// Creates a JetStreamContext from ``NatsClient`` with custom domain and timeout.
@@ -55,6 +63,7 @@ public final class JetStreamContext: @unchecked Sendable {
         self.client = client
         self.prefix = "$JS.\(domain).API"
         self._timeout = timeout
+        self.publishAsyncActor = JetStreamPublishAsync(client: client, timeout: timeout)
     }
 
     /// Creates a JetStreamContext from ``NatsClient``
@@ -65,11 +74,19 @@ public final class JetStreamContext: @unchecked Sendable {
         self.client = client
         self.prefix = "$JS.API"
         self._timeout = 5.0
+        self.publishAsyncActor = JetStreamPublishAsync(client: client, timeout: 5.0)
     }
 
     /// Sets a custom timeout for JetStream API requests.
     public func setTimeout(_ timeout: TimeInterval) {
         timeoutLock.withLockScoped { _timeout = timeout }
+    }
+
+    deinit {
+        // Tear down the batched-publish subscription/pump best-effort. `deinit` is nonisolated, so
+        // fire-and-forget onto the actor; the `Task` retains the (Sendable) actor long enough to run.
+        let pub = publishAsyncActor
+        Task { await pub.shutdown() }
     }
 }
 
@@ -202,38 +219,11 @@ public struct AckFuture {
                 // this should not be reachable
                 throw NatsError.ClientError.internalError("error waiting for response")
             })
-        if response.status == StatusCode.noResponders {
-            throw JetStreamError.PublishError.streamNotFound
-        }
-
-        let decoder = JSONDecoder()
-        guard let payload = response.payload else {
-            throw JetStreamError.RequestError.emptyResponsePayload
-        }
-
-        // A publish-ack error (e.g. wrong last sequence, err_code 10071) comes back
-        // as `{"error":{...},"stream":..,"seq":0}`: it carries `stream`/`seq` but no
-        // `type`, so `Response<Ack>` cannot represent it. Its success branch would
-        // mis-decode the error as an `Ack` with `seq: 0` and swallow the failure, so
-        // the error object has to be detected explicitly before decoding the ack.
-        if let pubAckErr = try? decoder.decode(PubAckError.self, from: payload),
-            let apiErr = pubAckErr.error
-        {
-            if let publishErr = JetStreamError.PublishError(from: apiErr) {
-                throw publishErr
-            }
-            throw apiErr
-        }
-
-        return try decoder.decode(Ack.self, from: payload)
-    }
-
-    private struct PubAckError: Decodable {
-        let error: JetStreamError.APIError?
+        return try Ack.decodeAck(from: response)
     }
 }
 
-public struct Ack: Codable {
+public struct Ack: Codable, Sendable {
     public let stream: String
     public let seq: UInt64
     public let domain: String?
@@ -259,6 +249,47 @@ public struct Ack: Codable {
 
         // Decode `duplicate` and provide a default value of `false` if not present
         duplicate = try container.decodeIfPresent(Bool.self, forKey: .duplicate) ?? false
+    }
+}
+
+extension Ack {
+    /// Decodes a JetStream publish-ack ``NatsMessage`` into an ``Ack``, or throws the failure the
+    /// server reported. This is the single source of truth for interpreting a publish reply and is
+    /// shared by the synchronous ``AckFuture/wait()`` and the async publisher's ack pump.
+    ///
+    /// Interpretation order (must not change):
+    /// 1. `status == noResponders` → ``JetStreamError/PublishError/streamNotFound`` (no stream is
+    ///    listening on the subject).
+    /// 2. A publish-ack error (e.g. wrong last sequence, err_code 10071) comes back as
+    ///    `{"error":{...},"stream":..,"seq":0}`: it carries `stream`/`seq` but no `type`, so
+    ///    `Response<Ack>` cannot represent it. Its success branch would mis-decode the error as an
+    ///    `Ack` with `seq: 0` and swallow the failure, so the error object has to be detected
+    ///    explicitly BEFORE decoding the ack. This keeps the CAS-error fix in one place.
+    /// 3. Otherwise decode the ``Ack`` (empty payload → ``JetStreamError/RequestError/emptyResponsePayload``).
+    static func decodeAck(from message: NatsMessage) throws -> Ack {
+        if message.status == StatusCode.noResponders {
+            throw JetStreamError.PublishError.streamNotFound
+        }
+
+        let decoder = JSONDecoder()
+        guard let payload = message.payload else {
+            throw JetStreamError.RequestError.emptyResponsePayload
+        }
+
+        if let pubAckErr = try? decoder.decode(PubAckError.self, from: payload),
+            let apiErr = pubAckErr.error
+        {
+            if let publishErr = JetStreamError.PublishError(from: apiErr) {
+                throw publishErr
+            }
+            throw apiErr
+        }
+
+        return try decoder.decode(Ack.self, from: payload)
+    }
+
+    private struct PubAckError: Decodable {
+        let error: JetStreamError.APIError?
     }
 }
 

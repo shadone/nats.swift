@@ -32,6 +32,7 @@ func runScenario(
     case "corePubSub": return try await runCorePubSub(nats: nats, config: config)
     case "reqReply": return try await runReqReply(nats: nats, config: config)
     case "jsPublish": return try await runJsPublish(nats: nats, js: js, config: config)
+    case "jsPublishAsync": return try await runJsPublishAsync(nats: nats, js: js, config: config)
     case "kvPutGet": return try await runKvPutGet(js: js, config: config)
     case "objPutGet": return try await runObjPutGet(js: js, config: config)
     case "pullConsume": return try await runPullConsume(nats: nats, js: js, config: config)
@@ -200,6 +201,44 @@ func runJsPublish(
         let secs = seconds(fromNanos: elapsed)
         return ScenarioResult(
             name: "jsPublish", count: count, payloadSize: config.size,
+            elapsedMs: millis(fromNanos: elapsed),
+            metrics: [Metric(label: "msgs/sec", value: Double(count) / secs)])
+    } cleanup: {
+        try? await js.deleteStream(name: stream)
+    }
+}
+
+// MARK: - JetStream async (batched) publish
+
+/// Batched publish via the bounded async-publish window: fire all N without awaiting each ack, then
+/// drain with publishAsyncComplete. Isolates the throughput of the pipelined path from the sync
+/// per-message ack round-trip that caps `jsPublish`.
+func runJsPublishAsync(
+    nats: NatsClient, js: JetStreamContext, config: Config
+) async throws -> ScenarioResult {
+    let count = jetStreamCount(config)
+    let token = uniqueToken()
+    let stream = "perf_jsa_\(token)"
+    let subject = "perf.jsa.\(token)"
+    let payload = Data(count: config.size)
+
+    _ = try await js.createStream(cfg: StreamConfig(name: stream, subjects: [subject]))
+    return try await withCleanup {
+        for _ in 0..<warmupCount(count) {
+            _ = try await js.publishAsync(subject, message: payload)
+        }
+        try await js.publishAsyncComplete(timeout: 60)
+
+        let start = DispatchTime.now().uptimeNanoseconds
+        for _ in 0..<count {
+            _ = try await js.publishAsync(subject, message: payload)
+        }
+        try await js.publishAsyncComplete(timeout: 60)
+        let elapsed = DispatchTime.now().uptimeNanoseconds - start
+
+        let secs = seconds(fromNanos: elapsed)
+        return ScenarioResult(
+            name: "jsPublishAsync", count: count, payloadSize: config.size,
             elapsedMs: millis(fromNanos: elapsed),
             metrics: [Metric(label: "msgs/sec", value: Double(count) / secs)])
     } cleanup: {

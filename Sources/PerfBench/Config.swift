@@ -19,6 +19,7 @@ let allScenarioNames: [String] = [
     "corePubSub",
     "reqReply",
     "jsPublish",
+    "jsPublishAsync",
     "kvPutGet",
     "objPutGet",
     "pullConsume",
