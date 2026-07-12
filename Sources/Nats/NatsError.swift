@@ -215,6 +215,7 @@ public enum NatsError {
         case invalidQueue
         case permissionDenied
         case subscriptionClosed
+        case slowConsumer(subject: String)
 
         public var description: String {
             switch self {
@@ -226,6 +227,8 @@ public enum NatsError {
                 return "nats: permission denied"
             case .subscriptionClosed:
                 return "nats: subscription closed"
+            case .slowConsumer(let subject):
+                return "nats: slow consumer on subject \(subject): messages dropped"
             }
         }
     }

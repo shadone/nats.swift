@@ -15,7 +15,14 @@ import Foundation
 import NIOConcurrencyHelpers
 import NIOCore
 
-// TODO(pp): Implement slow consumer
+/// An `AsyncSequence` of inbound ``NatsMessage`` for a single subscription.
+///
+/// Inbound messages are buffered up to `capacity` (see
+/// ``NatsClientOptions/subscriptionCapacity(_:)``). When the buffer is full the client is a
+/// "slow consumer": further messages are dropped and a
+/// ``NatsError/SubscriptionError/slowConsumer(subject:)`` is surfaced via the connection's
+/// `.error` event (once per slow episode). The subscription itself keeps working — the error is
+/// never delivered into the sequence — and resumes buffering once the consumer catches up.
 public final class NatsSubscription: AsyncSequence, Sendable {
     public typealias Element = NatsMessage
     public typealias AsyncIterator = SubscriptionIterator
@@ -34,18 +41,26 @@ public final class NatsSubscription: AsyncSequence, Sendable {
     internal let sid: UInt64
 
     private struct State: Sendable {
-        var buffer: [Result<NatsMessage, NatsError.SubscriptionError>] = []
+        var buffer = FIFOBuffer<Result<NatsMessage, NatsError.SubscriptionError>>()
         var closed = false
         var delivered: UInt64 = 0
         var continuation:
             CheckedContinuation<Result<NatsMessage, NatsError.SubscriptionError>?, Never>? = nil
+        // Edge flag: set on the first overflow drop of a slow episode so the slow-consumer
+        // event fires exactly once per episode; cleared once the backlog drains below the
+        // low-water mark (see `slowConsumerLowWaterMark`).
+        var slowConsumer = false
     }
 
     private let state = NIOLockedValueBox(State())
     private let capacity: UInt64
     private let conn: ConnectionHandler
 
-    private static let defaultSubCapacity: UInt64 = 512 * 1024
+    /// Backlog level at which the per-episode slow-consumer edge flag is cleared, so a later
+    /// episode surfaces a fresh event. Half of `capacity` avoids flapping around the boundary.
+    private var slowConsumerLowWaterMark: Int { Int(capacity / 2) }
+
+    internal static let defaultSubCapacity: UInt64 = 512 * 1024
 
     convenience init(sid: UInt64, subject: String, queue: String?, conn: ConnectionHandler) throws {
         try self.init(
@@ -98,11 +113,18 @@ public final class NatsSubscription: AsyncSequence, Sendable {
             if state.closed {
                 return .empty
             }
-            guard let first = state.buffer.first else {
+            guard let first = state.buffer.popFirst() else {
                 return .empty
             }
-            state.buffer.removeFirst()
             state.delivered += 1
+            // Reset the slow-consumer edge flag once the backlog drains below the low-water mark (or
+            // fully empties), so a later slow episode fires a fresh event. The `isEmpty` clause also
+            // covers `capacity == 1`, where the low-water mark is 0 and would otherwise never reset.
+            if state.slowConsumer
+                && (state.buffer.isEmpty || state.buffer.count < slowConsumerLowWaterMark)
+            {
+                state.slowConsumer = false
+            }
             switch first {
             case .success(let message): return .message(message)
             case .failure(let error): return .failure(error)
@@ -130,26 +152,51 @@ public final class NatsSubscription: AsyncSequence, Sendable {
         }
     }
 
-    func receiveMessage(_ message: NatsMessage) {
-        let continuationToResume:
-            CheckedContinuation<Result<NatsMessage, NatsError.SubscriptionError>?, Never>? =
-                state.withLockedValue { state in
-                    if let continuation = state.continuation {
-                        state.continuation = nil
-                        return continuation
+    /// Delivers an inbound message: resumes a waiting reader, or buffers it, or (on overflow) drops it.
+    ///
+    /// Returns the subject a slow-consumer `.error` event should be fired for (once per overflow
+    /// episode), or `nil` when none is due. The event is RETURNED rather than fired here so the caller
+    /// can fire it AFTER releasing the connection's `subscriptions` lock — a user `.error` handler runs
+    /// synchronously, and must never run while that lock is held (it would stall concurrent
+    /// subscribe/unsubscribe). Resuming the reader continuation here is fine: `resume` only schedules.
+    func receiveMessage(_ message: NatsMessage) -> String? {
+        // Decide everything under the lock, then act (resume) OUTSIDE it: never call a continuation
+        // while holding `state.withLockedValue`.
+        enum PostLockAction {
+            case resume(
+                CheckedContinuation<Result<NatsMessage, NatsError.SubscriptionError>?, Never>)
+            case fireSlowConsumer
+            case none
+        }
 
-                    } else if state.buffer.count < capacity {
-                        // Only append to buffer if no continuation is available
-                        // TODO(pp): Handle SlowConsumer as subscription event
-                        state.buffer.append(.success(message))
-                    } else {
-                        // Slow consumer: message dropped intentionally.
-                        // TODO: emit SlowConsumer subscription event.
-                    }
-                    return nil
+        let action: PostLockAction = state.withLockedValue { state in
+            if let continuation = state.continuation {
+                // Only append to buffer if no continuation is available
+                state.continuation = nil
+                return .resume(continuation)
+            } else if state.buffer.count < capacity {
+                state.buffer.append(.success(message))
+                return .none
+            } else {
+                // Slow consumer: buffer is full. Drop the message (don't block the read loop,
+                // don't grow unbounded), but surface a slow-consumer event ONCE per episode.
+                if state.slowConsumer {
+                    return .none
                 }
+                state.slowConsumer = true
+                return .fireSlowConsumer
+            }
+        }
 
-        continuationToResume?.resume(returning: .success(message))
+        switch action {
+        case .resume(let continuation):
+            continuation.resume(returning: .success(message))
+            return nil
+        case .fireSlowConsumer:
+            return subject
+        case .none:
+            return nil
+        }
     }
 
     func receiveError(_ error: NatsError.SubscriptionError) {
@@ -220,8 +267,16 @@ public final class NatsSubscription: AsyncSequence, Sendable {
                         // It is incremented here — before the message is in hand.
                         state.delivered += 1
 
-                        if let message = state.buffer.first {
-                            state.buffer.removeFirst()
+                        if let message = state.buffer.popFirst() {
+                            // Reset the slow-consumer edge flag once the backlog drains below the
+                            // low-water mark (or fully empties, which also covers `capacity == 1`),
+                            // so a later slow episode fires a fresh event.
+                            if state.slowConsumer
+                                && (state.buffer.isEmpty
+                                    || state.buffer.count < slowConsumerLowWaterMark)
+                            {
+                                state.slowConsumer = false
+                            }
                             return .resume(message)
                         } else {
                             state.continuation = continuation

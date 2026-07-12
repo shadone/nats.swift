@@ -61,6 +61,7 @@ final class ConnectionHandler: ChannelInboundHandler, Sendable {
     private let rootCertificate: URL?
     private let clientCertificate: URL?
     private let clientKey: URL?
+    private let subscriptionCapacity: UInt64
 
     typealias InboundIn = ByteBuffer
     private let state = NIOLockedValueBox(NatsState.pending)
@@ -123,7 +124,8 @@ final class ConnectionHandler: ChannelInboundHandler, Sendable {
         retainServersOrder: Bool, ignoreDiscoveredServers: Bool,
         pingInterval: TimeInterval, auth: Auth?, requireTls: Bool, tlsFirst: Bool,
         clientCertificate: URL?, clientKey: URL?,
-        rootCertificate: URL?, retryOnFailedConnect: Bool
+        rootCertificate: URL?, retryOnFailedConnect: Bool,
+        subscriptionCapacity: UInt64 = NatsSubscription.defaultSubCapacity
     ) {
         self._urls = NIOLockedValueBox(urls)
         self.group = .singleton
@@ -140,6 +142,7 @@ final class ConnectionHandler: ChannelInboundHandler, Sendable {
         self.clientKey = clientKey
         self.rootCertificate = rootCertificate
         self.retryOnFailedConnect = retryOnFailedConnect
+        self.subscriptionCapacity = subscriptionCapacity
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -318,10 +321,14 @@ final class ConnectionHandler: ChannelInboundHandler, Sendable {
         let natsMsg = NatsMessage(
             payload: message.payload, subject: message.subject, replySubject: message.reply,
             length: message.length, headers: nil, status: nil, description: nil)
-        subscriptions.withLockedValue { subs in
-            if let sub = subs[message.sid] {
-                sub.receiveMessage(natsMsg)
-            }
+        // `receiveMessage` returns the subject of a slow-consumer event to fire (or nil). Fire it
+        // AFTER releasing the `subscriptions` lock so a user `.error` handler can't stall subscribe/
+        // unsubscribe.
+        let slowConsumerSubject = subscriptions.withLockedValue { subs in
+            subs[message.sid]?.receiveMessage(natsMsg)
+        }
+        if let subject = slowConsumerSubject {
+            fire(.error(NatsError.SubscriptionError.slowConsumer(subject: subject)))
         }
     }
 
@@ -330,10 +337,11 @@ final class ConnectionHandler: ChannelInboundHandler, Sendable {
             payload: message.payload, subject: message.subject, replySubject: message.reply,
             length: message.length, headers: message.headers, status: message.status,
             description: message.description)
-        subscriptions.withLockedValue { subs in
-            if let sub = subs[message.sid] {
-                sub.receiveMessage(natsMsg)
-            }
+        let slowConsumerSubject = subscriptions.withLockedValue { subs in
+            subs[message.sid]?.receiveMessage(natsMsg)
+        }
+        if let subject = slowConsumerSubject {
+            fire(.error(NatsError.SubscriptionError.slowConsumer(subject: subject)))
         }
     }
 
@@ -1076,7 +1084,8 @@ final class ConnectionHandler: ChannelInboundHandler, Sendable {
     ) async throws -> NatsSubscription {
         let sid = self.subscriptionCounter.wrappingIncrementThenLoad(
             ordering: AtomicUpdateOrdering.relaxed)
-        let sub = try NatsSubscription(sid: sid, subject: subject, queue: queue, conn: self)
+        let sub = try NatsSubscription(
+            sid: sid, subject: subject, queue: queue, capacity: subscriptionCapacity, conn: self)
 
         // Add subscription BEFORE sending command to avoid race condition
         subscriptions.withLockedValue { $0[sid] = sub }

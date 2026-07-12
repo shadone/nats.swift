@@ -32,6 +32,7 @@ public class NatsClientOptions {
     private var clientCertificate: URL? = nil
     private var clientKey: URL? = nil
     private var inboxPrefix: String = "_INBOX."
+    private var subscriptionCapacity: UInt64 = NatsSubscription.defaultSubCapacity
 
     public init() {}
 
@@ -219,6 +220,23 @@ public class NatsClientOptions {
         return self
     }
 
+    /// The maximum number of messages buffered per subscription before the client
+    /// starts dropping inbound messages (a "slow consumer").
+    ///
+    /// When a subscription's buffer is full, further inbound messages are dropped and a
+    /// ``NatsError/SubscriptionError/slowConsumer(subject:)`` is surfaced via the `.error`
+    /// event (once per slow episode). The subscription keeps working and resumes buffering
+    /// once the consumer catches up.
+    ///
+    /// Defaults to `512 * 1024`. Values below `1` are clamped to `1`. This is a connection-wide
+    /// default applied to every subscription the client creates, including the internal JetStream
+    /// deliver-inbox and request-reply subscriptions — so avoid very small values on a client that
+    /// also drives JetStream.
+    public func subscriptionCapacity(_ messages: Int) -> NatsClientOptions {
+        self.subscriptionCapacity = UInt64(max(1, messages))
+        return self
+    }
+
     public func build() -> NatsClient {
         let connectionHandler = ConnectionHandler(
             urls: urls,
@@ -233,7 +251,8 @@ public class NatsClientOptions {
             clientCertificate: clientCertificate,
             clientKey: clientKey,
             rootCertificate: rootCertificate,
-            retryOnFailedConnect: initialReconnect
+            retryOnFailedConnect: initialReconnect,
+            subscriptionCapacity: subscriptionCapacity
         )
         return NatsClient(inboxPrefix: inboxPrefix, connectionHandler: connectionHandler)
     }
