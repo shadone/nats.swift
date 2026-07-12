@@ -115,6 +115,13 @@ public actor OrderedConsumer {
     private var pumpTask: Task<Void, Never>?
     private var connListenerId: String?
 
+    /// Connection events are funnelled through this stream and drained by a single sequential task
+    /// (``eventTask``), so `.disconnected`/`.connected` are always handled in fire order — the
+    /// per-event `Task {}` fan-out this replaces gave no such ordering guarantee.
+    private let eventStream: AsyncStream<NatsEvent>
+    private let eventContinuation: AsyncStream<NatsEvent>.Continuation
+    private var eventTask: Task<Void, Never>?
+
     internal init(
         ctx: JetStreamContext,
         streamName: String,
@@ -149,6 +156,9 @@ public actor OrderedConsumer {
             of: NatsMessage.self, throwing: Error.self)
         self.natsMessages = stream
         self.continuation = continuation
+        let (events, eventContinuation) = AsyncStream.makeStream(of: NatsEvent.self)
+        self.eventStream = events
+        self.eventContinuation = eventContinuation
     }
 
     /// Creates an ordered consumer from a public ``OrderedConsumerConfig``.
@@ -214,10 +224,7 @@ public actor OrderedConsumer {
             try await recreate(maxAttempts: 1)
         } catch {
             closed = true
-            if let id = connListenerId {
-                ctx.client.off(id)
-                connListenerId = nil
-            }
+            finishConnectionEvents()
             continuation.finish(throwing: error)
             throw error
         }
@@ -235,10 +242,7 @@ public actor OrderedConsumer {
         closed = true
         pumpTask?.cancel()
         pumpTask = nil
-        if let id = connListenerId {
-            ctx.client.off(id)
-            connListenerId = nil
-        }
+        finishConnectionEvents()
         continuation.finish()
         if let sub = currentSub {
             try? await sub.unsubscribe()
@@ -256,6 +260,8 @@ public actor OrderedConsumer {
         // `stop()`/`terminate(_:)` has run.
         pumpTask?.cancel()
         continuation.finish()
+        eventContinuation.finish()
+        eventTask?.cancel()
         if let name = currentName {
             let ctx = self.ctx
             let stream = streamName
@@ -639,16 +645,35 @@ extension OrderedConsumer {
     }
 
     private func registerConnectionListener() {
-        let id = ctx.client.on([.connected, .disconnected, .suspended, .closed]) {
-            [weak self] event in
-            guard let self else {
-                return
+        // The client invokes this handler synchronously in event-fire order; yielding into
+        // `eventContinuation` preserves that order, and the single ``eventTask`` below drains it one
+        // event at a time. This makes `.disconnected` → `.connected` ordering a guarantee instead of
+        // relying on the scheduling of one detached `Task` per event.
+        let continuation = eventContinuation
+        let id = ctx.client.on([.connected, .disconnected, .suspended, .closed]) { event in
+            continuation.yield(event)
+        }
+        guard !id.isEmpty else {
+            return
+        }
+        connListenerId = id
+        let stream = eventStream
+        eventTask = Task { [weak self] in
+            for await event in stream {
+                await self?.handleConnectionEvent(event)
             }
-            Task { await self.handleConnectionEvent(event) }
         }
-        if !id.isEmpty {
-            connListenerId = id
+    }
+
+    /// Removes the connection listener and ends the event stream + its drain task. Idempotent.
+    private func finishConnectionEvents() {
+        if let id = connListenerId {
+            ctx.client.off(id)
+            connListenerId = nil
         }
+        eventContinuation.finish()
+        eventTask?.cancel()
+        eventTask = nil
     }
 
     private func handleConnectionEvent(_ event: NatsEvent) async {
@@ -703,10 +728,7 @@ extension OrderedConsumer {
         // landed on the continuation; the pump's later plain `finish()` is then a no-op, and its
         // in-flight `recreate()` throws on its next `closed` re-check.
         closed = true
-        if let id = connListenerId {
-            ctx.client.off(id)
-            connListenerId = nil
-        }
+        finishConnectionEvents()
         pumpTask?.cancel()
         pumpTask = nil
         continuation.finish(throwing: error)
