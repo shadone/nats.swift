@@ -17,7 +17,7 @@ import Foundation
 ///
 /// A bucket is backed by a JetStream stream named `KV_<bucket>` whose subjects
 /// are `$KV.<bucket>.>`. The configuration is mapped to a ``StreamConfig`` via
-/// ``KeyValueContext/createKeyValue(cfg:)``.
+/// ``JetStreamContext/createKeyValue(cfg:)``.
 public struct KeyValueConfig {
     /// The name of the bucket. Must match `^[a-zA-Z0-9_-]+$`.
     public var bucket: String

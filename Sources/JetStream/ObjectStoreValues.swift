@@ -77,7 +77,7 @@ public struct ObjectMetaOptions: Codable, Equatable, Sendable {
 
 /// `ObjectMeta` is the high-level, user-supplied information about an object.
 ///
-/// It is the input to ``ObjectStore/put(_:data:)``; the object's name (``name``) is
+/// It is the input to ``ObjectStore/put(_:data:)-(ObjectMeta,_)``; the object's name (``name``) is
 /// required and unique within the store.
 public struct ObjectMeta: Codable, Equatable, Sendable {
     /// The name of the object. Required and unique within the object store.

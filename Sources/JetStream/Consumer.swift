@@ -49,7 +49,7 @@ public final class Consumer: @unchecked Sendable {
     /// - Returns ``ConsumerInfo`` from the server.
     ///
     /// > **Throws:**
-    /// > - ``JetStreamRequestError`` if the request was unsuccessful.
+    /// > - ``JetStreamError/RequestError`` if the request was unsuccessful.
     /// > - ``JetStreamError`` if the server responded with an API error.
     public func info() async throws -> ConsumerInfo {
         let subj = "CONSUMER.INFO.\(info.stream).\(info.name)"

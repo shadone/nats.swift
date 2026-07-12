@@ -66,7 +66,7 @@ public struct KeyValueWatchOptions: Sendable {
 /// coherent with no missing keys and no duplicates. This matches nats.go.
 ///
 /// Always call ``stop()`` when finished to tear down the server-side consumer.
-/// The ``deinit`` is only a best-effort backstop for a dropped watcher; it does
+/// The `deinit` is only a best-effort backstop for a dropped watcher; it does
 /// not replace an explicit ``stop()``.
 // `@unchecked Sendable`: every stored property is an immutable Sendable value
 // except `pumpTask`, whose access is serialized by `stateLock` (mirrors

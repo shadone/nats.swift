@@ -18,7 +18,7 @@ import Nuid
 
 /// A context which can perform jetstream scoped requests.
 ///
-/// `@unchecked Sendable`: `client` (a `Sendable` ``NatsClient``) and `prefix` are immutable `let`s;
+/// `@unchecked Sendable`: `client` (a `Sendable` `NatsClient`) and `prefix` are immutable `let`s;
 /// the only mutable state is `timeout`, which the public ``setTimeout(_:)`` can change after
 /// construction. That single field is guarded by `timeoutLock`, so every read and write is
 /// serialized and sharing a context across concurrency domains is data-race-free. The lock is held
@@ -40,7 +40,7 @@ public final class JetStreamContext: @unchecked Sendable {
     /// not track later ``setTimeout(_:)`` changes.
     internal let asyncPublisher: JetStreamPublishAsync
 
-    /// Creates a JetStreamContext from ``NatsClient`` with optional custom prefix and timeout.
+    /// Creates a JetStreamContext from `NatsClient` with optional custom prefix and timeout.
     ///
     /// - Parameters:
     ///  - client: NATS client connection.
@@ -53,7 +53,7 @@ public final class JetStreamContext: @unchecked Sendable {
         self.asyncPublisher = JetStreamPublishAsync(client: client, timeout: timeout)
     }
 
-    /// Creates a JetStreamContext from ``NatsClient`` with custom domain and timeout.
+    /// Creates a JetStreamContext from `NatsClient` with custom domain and timeout.
     ///
     /// - Parameters:
     ///  - client: NATS client connection.
@@ -66,7 +66,7 @@ public final class JetStreamContext: @unchecked Sendable {
         self.asyncPublisher = JetStreamPublishAsync(client: client, timeout: timeout)
     }
 
-    /// Creates a JetStreamContext from ``NatsClient``
+    /// Creates a JetStreamContext from `NatsClient`
     ///
     /// - Parameters:
     ///  - client: NATS client connection.
@@ -174,7 +174,7 @@ public struct JetStreamAPIResponse: Codable {
     public let error: JetStreamError.APIError
 }
 
-/// Used to await for response from ``JetStreamContext/publish(_:message:headers:)``
+/// Used to await for response from ``JetStreamContext/publish(_:message:headers:msgTTL:)``
 public struct AckFuture {
     let sub: NatsSubscription
     let timeout: TimeInterval

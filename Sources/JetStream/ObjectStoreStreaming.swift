@@ -31,7 +31,7 @@ extension ObjectStore {
     ///
     /// The `source` may yield `Data` values of any size: they are re-chunked into the
     /// store's fixed chunk size (`meta.chunkSize`, or the 128 KiB default) exactly as the
-    /// buffered ``put(_:data:)`` does, so a streamed object is byte-for-byte identical on
+    /// buffered ``ObjectStore/put(_:data:)-(ObjectMeta,_)`` does, so a streamed object is byte-for-byte identical on
     /// the wire to the same bytes put as one `Data` (same chunk subjects, same chunk count
     /// `ceil(total / chunkSize)`, same SHA-256 digest, same rolled-up meta).
     ///

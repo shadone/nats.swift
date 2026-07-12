@@ -19,7 +19,7 @@ import Nats
 /// It also allows for checking message metadata.
 ///
 /// `Sendable` (checked): the struct is deeply immutable (every stored property is a `let`), its
-/// `message` is a `Sendable` `NatsMessage`, and its `client` is a `Sendable` ``NatsClient``. This is
+/// `message` is a `Sendable` `NatsMessage`, and its `client` is a `Sendable` `NatsClient`. This is
 /// what lets a message flow through the `@Sendable` ``MessageHandler``, the mailbox actor and the
 /// delivery task groups, all of which already assume it.
 public struct JetStreamMessage: Sendable {

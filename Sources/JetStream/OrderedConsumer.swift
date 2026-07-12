@@ -59,8 +59,8 @@ internal struct OrderedConsumerCursor: Equatable {
 /// `resetOrderedConsumer`).
 ///
 /// ## Concurrency model
-/// An `actor` owns all mutable state; exactly one long-lived pump ``Task`` drives the deliver-inbox
-/// subscription (via ``PushDelivery``) and calls back into the actor to mutate state and emit
+/// An `actor` owns all mutable state; exactly one long-lived pump `Task` drives the deliver-inbox
+/// subscription (via `PushDelivery`) and calls back into the actor to mutate state and emit
 /// output. Output flows through an `AsyncThrowingStream`. This eliminates data races by type, gives
 /// a single cancellation path, and reuses the repo's `nextWithTimeout` race idiom for missed
 /// heartbeats.

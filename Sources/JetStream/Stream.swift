@@ -52,7 +52,7 @@ public final class Stream: @unchecked Sendable {
     /// - Returns ``StreamInfo`` from the server.
     ///
     /// > **Throws:**
-    /// > - ``JetStreamRequestError`` if the request was unsuccessful.
+    /// > - ``JetStreamError/RequestError`` if the request was unsuccessful.
     /// > - ``JetStreamError`` if the server responded with an API error.
     public func info() async throws -> StreamInfo {
         let subj = "STREAM.INFO.\(info.config.name)"
@@ -76,7 +76,7 @@ public final class Stream: @unchecked Sendable {
     /// - Returns ``StreamMessage`` containing message payload, headers and metadata or nil if the message was not found.
     ///
     /// > **Throws:**
-    /// > - ``JetStreamRequestError`` if the request was unsuccessful.
+    /// > - ``JetStreamError/RequestError`` if the request was unsuccessful.
     /// > - ``JetStreamError`` if the server responded with an API error.
     public func getMessage(sequence: UInt64, subject: String? = nil) async throws -> StreamMessage?
     {
@@ -91,7 +91,7 @@ public final class Stream: @unchecked Sendable {
     /// - Returns ``StreamMessage`` containing message payload, headers and metadata or nil if the message was not found.
     ///
     /// > **Throws:**
-    /// > - ``JetStreamRequestError`` if the request was unsuccessful.
+    /// > - ``JetStreamError/RequestError`` if the request was unsuccessful.
     /// > - ``JetStreamError`` if the server responded with an API error.
     public func getMessage(firstForSubject: String) async throws -> StreamMessage? {
         let request = GetMessageRequest(next: firstForSubject)
@@ -105,7 +105,7 @@ public final class Stream: @unchecked Sendable {
     /// - Returns ``StreamMessage`` containing message payload, headers and metadata or nil if the message was not found.
     ///
     /// > **Throws:**
-    /// > - ``JetStreamRequestError`` if the request was unsuccessful.
+    /// > - ``JetStreamError/RequestError`` if the request was unsuccessful.
     /// > - ``JetStreamError`` if the server responded with an API error.
     public func getMessage(lastForSubject: String) async throws -> StreamMessage? {
         let request = GetMessageRequest(last: lastForSubject)
@@ -115,7 +115,7 @@ public final class Stream: @unchecked Sendable {
     /// Retrieves a message from stream.
     ///
     /// Requires a ``Stream`` with ``StreamConfig/allowDirect`` set to `true`.
-    /// This is different from ``Stream/getMsg(sequence:subject:)``, as it can fetch ``StreamMessage``
+    /// This is different from ``Stream/getMessage(sequence:subject:)``, as it can fetch ``StreamMessage``
     /// from any replica member. This means read after write is possible,
     /// as that given replica might not yet catch up with the leader.
     ///
@@ -127,7 +127,7 @@ public final class Stream: @unchecked Sendable {
     /// - Returns ``StreamMessage`` containing message payload, headers and metadata or nil if the message was not found.
     ///
     /// > **Throws:**
-    /// >  - ``JetStreamRequestError`` if the request was unsuccessful.
+    /// >  - ``JetStreamError/RequestError`` if the request was unsuccessful.
     /// >  - ``JetStreamError/DirectGetError`` if the server responded with an error or the response is invalid.
     public func getMessageDirect(
         sequence: UInt64, subject: String? = nil
@@ -139,7 +139,7 @@ public final class Stream: @unchecked Sendable {
     /// Retrieves the first message on the stream for a given subject.
     ///
     /// Requires a ``Stream`` with ``StreamConfig/allowDirect`` set to `true`.
-    /// This is different from ``Stream/getMsg(firstForSubject:)``, as it can fetch ``StreamMessage``
+    /// This is different from ``Stream/getMessage(firstForSubject:)``, as it can fetch ``StreamMessage``
     /// from any replica member. This means read after write is possible,
     /// as that given replica might not yet catch up with the leader.
     ///
@@ -148,7 +148,7 @@ public final class Stream: @unchecked Sendable {
     /// - Returns ``StreamMessage`` containing message payload, headers and metadata or nil if the message was not found.
     ///
     /// > **Throws:**
-    /// >  - ``JetStreamRequestError`` if the request was unsuccessful.
+    /// >  - ``JetStreamError/RequestError`` if the request was unsuccessful.
     /// >  - ``JetStreamError/DirectGetError`` if the server responded with an error or the response is invalid.
     public func getMessageDirect(firstForSubject: String) async throws -> StreamMessage? {
         let request = GetMessageRequest(next: firstForSubject)
@@ -158,7 +158,7 @@ public final class Stream: @unchecked Sendable {
     /// Retrieves last message on a stream for a given subject
     ///
     /// Requires a ``Stream`` with ``StreamConfig/allowDirect`` set to `true`.
-    /// This is different from ``Stream/getMsg(lastForSubject:)``, as it can fetch ``StreamMessage``
+    /// This is different from ``Stream/getMessage(lastForSubject:)``, as it can fetch ``StreamMessage``
     /// from any replica member. This means read after write is possible,
     /// as that given replica might not yet catch up with the leader.
     ///
@@ -167,7 +167,7 @@ public final class Stream: @unchecked Sendable {
     /// - Returns ``StreamMessage`` containing message payload, headers and metadata.
     ///
     /// > **Throws:**
-    /// >  - ``JetStreamRequestError`` if the request was unsuccessful.
+    /// >  - ``JetStreamError/RequestError`` if the request was unsuccessful.
     /// >  - ``JetStreamError/DirectGetError`` if the server responded with an error or the response is invalid.
     public func getMessageDirect(lastForSubject: String) async throws -> StreamMessage? {
         let request = GetMessageRequest(last: lastForSubject)
@@ -218,7 +218,7 @@ public final class Stream: @unchecked Sendable {
     /// - Returns the number of messages purged.
     ///
     /// > **Throws:**
-    /// > - ``JetStreamRequestError`` if the request was unsuccessful.
+    /// > - ``JetStreamError/RequestError`` if the request was unsuccessful.
     /// > - ``JetStreamError`` if the server responded with an API error.
     public func purge(subject: String? = nil) async throws -> UInt64 {
         let request = PurgeRequest(filter: subject)
@@ -236,7 +236,7 @@ public final class Stream: @unchecked Sendable {
     /// - Returns the number of messages purged.
     ///
     /// > **Throws:**
-    /// > - ``JetStreamRequestError`` if the request was unsuccessful.
+    /// > - ``JetStreamError/RequestError`` if the request was unsuccessful.
     /// > - ``JetStreamError`` if the server responded with an API error.
     public func purge(sequence: UInt64, subject: String? = nil) async throws -> UInt64 {
         let request = PurgeRequest(seq: sequence, filter: subject)
@@ -254,7 +254,7 @@ public final class Stream: @unchecked Sendable {
     /// - Returns the number of messages purged.
     ///
     /// > **Throws:**
-    /// > - ``JetStreamRequestError`` if the request was unsuccessful.
+    /// > - ``JetStreamError/RequestError`` if the request was unsuccessful.
     /// > - ``JetStreamError`` if the server responded with an API error.
     public func purge(keep: UInt64, subject: String? = nil) async throws -> UInt64 {
         let request = PurgeRequest(keep: keep, filter: subject)

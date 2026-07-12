@@ -53,7 +53,7 @@ public struct ObjectStoreWatchOptions: Sendable {
 /// resumes the live tail with no gap and no duplicate.
 ///
 /// Always call ``stop()`` when finished to tear down the server-side consumer. The
-/// ``deinit`` is only a best-effort backstop for a dropped watcher; it does not replace an
+/// `deinit` is only a best-effort backstop for a dropped watcher; it does not replace an
 /// explicit ``stop()``.
 // `@unchecked Sendable`: every stored property is an immutable Sendable value
 // except `pumpTask`, whose access is serialized by `stateLock` (mirrors

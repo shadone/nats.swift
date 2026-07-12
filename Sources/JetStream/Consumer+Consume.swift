@@ -68,7 +68,7 @@ extension Consumer: MessageConsuming {
     ///
     /// Like ``consume(_:onError:)``, each call starts its own independent pull loop; concurrent loops
     /// on the same consumer compete for its messages. Breaking the `for await` loop and releasing the
-    /// returned context tears the loop down (see ``MessagesContext``); ``stop()``/``drain()`` do so
+    /// returned context tears the loop down (see ``MessagesContext``); ``MessagesContext/stop()``/``MessagesContext/drain()`` do so
     /// eagerly.
     public func messages() throws -> any MessagesContext {
         let stream = makePullStream(

@@ -35,7 +35,7 @@ extension NatsClient {
     /// Registers a callback for given event type.
     ///
     /// - Parameters:
-    ///   - events: a ``NatsEventKind`` for which the handler will be invoked.
+    ///   - event: a ``NatsEventKind`` for which the handler will be invoked.
     ///   - handler: a callback invoked upon triggering a specific event.
     ///
     /// - Returns an ID of the registered listener which can be used to disable it.

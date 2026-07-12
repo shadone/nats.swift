@@ -26,7 +26,7 @@ extension Consumer {
     ///   - expires: timeout of a pull request
     ///   - idleHeartbeat: interval in which server should send heartbeat messages (if no user messages are available).
     ///
-    ///  - Returns: ``FetchResult`` which implements ``AsyncSequence`` allowing iteration over messages.
+    ///  - Returns: ``FetchResult`` which implements `AsyncSequence` allowing iteration over messages.
     ///
     ///  - Throws:
     ///   - ``JetStreamError/FetchError`` if there was an error while fetching messages

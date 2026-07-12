@@ -79,7 +79,7 @@ public struct Auth: Sendable {
 /// The main NATS client.
 ///
 /// `Sendable` (checked): both stored properties are immutable `let`s. `connectionHandler` is a
-/// ``ConnectionHandler`` — itself `Sendable`, since all of its mutable state is guarded by
+/// `ConnectionHandler` — itself `Sendable`, since all of its mutable state is guarded by
 /// `NIOLockedValueBox`/`ManagedAtomic` — and `inboxPrefix` is an immutable `String`. This makes
 /// the client safe to share across concurrency domains (JetStream contexts, services, actors)
 /// without a `@preconcurrency` import.
@@ -120,9 +120,9 @@ extension NatsClient {
     /// > - ``NatsError/ConnectError/tlsFailure(_:)`` if upgrading to TLS connection fails
     /// > - ``NatsError/ConnectError/timeout`` if there was a timeout waiting to establish TCP connection
     /// > - ``NatsError/ConnectError/dns(_:)`` if there was an error during dns lookup
-    /// > - ``NatsError/ConnectError/io`` if there was other error establishing connection
-    /// > - ``NatsError/ServerError/autorization(_:)`` if connection could not be established due to invalid/missing/expired auth
-    /// > - ``NatsError/ServerError/other(_:)`` if the server responds to client connection with a different error (e.g. max connections exceeded)
+    /// > - ``NatsError/ConnectError/io(_:)`` if there was other error establishing connection
+    /// > - ``NatsError/ServerError/authorizationViolation`` if connection could not be established due to invalid/missing/expired auth
+    /// > - ``NatsError/ServerError`` if the server responds to the client connection with another error (e.g. max connections exceeded)
     public func connect() async throws {
         logger.debug("connect")
         guard let connectionHandler = self.connectionHandler else {
@@ -194,7 +194,7 @@ extension NatsClient {
 
     /// Resumes a suspended connection.
     /// ``resume()`` will not wait for successful reconnection but rather trigger a reconnect process and return.
-    /// Register ``NatsEvent`` using ``NatsClient/on()`` to wait for successful reconnection.
+    /// Register ``NatsEvent`` using ``NatsClient/on(_:_:)-(NatsEventKind,_)`` to wait for successful reconnection.
     ///
     /// - Throws ``NatsError/ClientError`` if the conneciton is not in suspended state.
     public func resume() async throws {

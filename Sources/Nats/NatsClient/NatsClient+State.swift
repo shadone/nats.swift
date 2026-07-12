@@ -20,7 +20,7 @@ extension NatsClient {
     ///
     /// This surfaces the underlying connection lifecycle so callers can inspect the
     /// state directly instead of tracking ``NatsEventKind`` transitions (for example
-    /// `.connected`/`.closed`) out-of-band via ``NatsClient/on(_:_:)``.
+    /// `.connected`/`.closed`) out-of-band via ``NatsClient/on(_:_:)-(NatsEventKind,_)``.
     ///
     /// A freshly built client that has not yet connected reports ``NatsState/pending``.
     public var state: NatsState {

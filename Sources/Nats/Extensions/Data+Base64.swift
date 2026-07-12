@@ -24,7 +24,7 @@ extension Data {
 
     /// Encodes the data as PADDED URL-safe base64, matching Go's `base64.URLEncoding`.
     ///
-    /// Unlike ``base64EncodedURLSafeNotPadded()`` this KEEPS the `=` padding, which is
+    /// Unlike `base64EncodedURLSafeNotPadded()` this KEEPS the `=` padding, which is
     /// the encoding the JetStream object store uses for both object names
     /// (`$O.<bucket>.M.<encodeName(name)>`) and SHA-256 digest values. Stripping the
     /// padding — as the not-padded variant does — would break interop with nats.go, the
