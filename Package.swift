@@ -79,6 +79,9 @@ let package = Package(
         .executableTarget(name: "BenchmarkSub", dependencies: ["Nats"]),
         .executableTarget(name: "Example", dependencies: ["Nats"]),
         .executableTarget(name: "PerfBench", dependencies: ["Nats", "JetStream"]),
+        .executableTarget(
+            name: "Scenarios", dependencies: ["Nats", "JetStream", "Services"],
+            exclude: ["README.md"]),
     ],
     swiftLanguageModes: [.v6]
 )
