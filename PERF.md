@@ -38,7 +38,8 @@ buffer at read time.
 | corePub | ~1.2M msgs/s (~20 MB/s) |
 | corePubSub | ~390k msgs/s |
 | reqReply | p50 ~100 µs, p99 ~160 µs |
-| jsPublish (ack-awaited) | ~14.7k msgs/s |
+| jsPublish (sync, ack-awaited) | ~15k msgs/s |
+| jsPublishAsync (batched window) | ~42k msgs/s |
 | kvPutGet | put ~13.9k / get ~12.4k ops/s |
 | objPutGet (32 MiB) | put ~460 MB/s, get ~1.4 GB/s |
 | pullConsume (ack-none) | ~170–190k msgs/s |
@@ -98,6 +99,11 @@ validation and ignore-on-failure behavior).
   delivery path, so it is deferred as higher-risk / lower-value: KV/Object watch
   (the ordered engine's primary use) reads `natsMessages` directly — the faster
   single-queue path — and is inherently low-throughput.
+- **Async publish ~42k msgs/s** — `publishAsync` (batched, bounded window) is ~2.8×
+  the sync `publish().wait()` but is bounded by per-message actor serialization on
+  both the send and ack paths. A lock-based (non-actor) publisher — matching how
+  nats.go's async publish avoids an async hop per message — could push it
+  substantially higher, at the cost of more manual concurrency.
 - **Overlapping pulls** — the pull loop still fetches the next batch only once the
   current one drains, leaving a round-trip gap between batches. With the
   per-message cost gone this is a minor remaining factor; an overlapping-pull
