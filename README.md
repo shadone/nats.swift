@@ -43,6 +43,9 @@ Currently, the client supports **Core NATS** with auth, TLS, lame duck mode and 
   `ignoreDiscoveredServers()`, `waitForConnected()`, `state`/`isConnected`,
   `unlimitedReconnects()`.
 
+- **Cross-platform** — builds and runs on **macOS, iOS, and Linux**; the full
+  test suite (308 tests) passes on macOS and Linux, with an iOS build in CI.
+
 The whole package builds under **Swift 6 language mode**
 (`swiftLanguageModes: [.v6]`) with strict concurrency enforced. Benchmarks and a
 performance baseline are in [PERF.md](./PERF.md) (harness: `Sources/PerfBench`).
@@ -77,10 +80,14 @@ We'll do our best to help quickly. You can also just drop by and say hello. We'r
 
 ## Installation via Swift Package Manager
 
+**Requirements:** a Swift 6.0+ toolchain, and macOS 13+, iOS 13+, or Linux. On
+Linux, first install the system libsodium that the `nkeys.swift` dependency links
+(`apt-get install -y libsodium-dev`).
+
 Include this package as a dependency in your project's `Package.swift` file and add the package name to your target as shown in the following example:
 
 ```swift
-// swift-tools-version:5.7
+// swift-tools-version:6.0
 
 import PackageDescription
 
@@ -124,8 +131,8 @@ let subscription = try await nats.subscribe(subject: "events.>")
 try await nats.publish("my event".data(using: .utf8)!, subject: "events.example")
 
 // receive published messages
-for await msg in subscriptions {
-    print( "Received: \(String(data:msg.payload!, encoding: .utf8)!)")
+for try await msg in subscription {
+    print("Received: \(String(data: msg.payload!, encoding: .utf8)!)")
 }
  ```
 
@@ -203,10 +210,14 @@ on _Subject-Based Messaging_](https://docs.nats.io/nats-concepts/subjects).
 
 ### Setting Log Levels
 
-The default log level is `.info`. You can set it to see more or less verbose messages. Possible values are `.debug`, `.info`, `.error` or `.critical`.
+The client logs through [swift-log](https://github.com/apple/swift-log) via a
+public module-level `logger`. The default level is `.info`; set it to see more or
+less verbose output (`.debug`, `.info`, `.error`, `.critical`):
 
 ```swift
-// TODO
+import Nats
+
+logger.logLevel = .debug
 ```
 
 ### Events

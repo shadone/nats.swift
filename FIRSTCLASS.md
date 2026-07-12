@@ -15,10 +15,34 @@ clients build it, as a real contribution to the library.
 
 ## What was delivered
 
-Fifteen reviewed, tested, committed features, then a performance + chaos hardening pass. Every commit builds clean, passes
-against a real `nats-server` (v2.12.7), is `swift format`-clean, and was
-reviewed by an independent pass (correctness + Swift-6 concurrency) with
-findings fixed before commit. The final suite is **287 tests, 0 failures**.
+A first-class JetStream + Services surface, then performance, chaos, and platform
+hardening. Every commit builds clean, passes against a real `nats-server`, is
+`swift format`-clean, and was reviewed by an independent pass (correctness +
+Swift-6 concurrency) with findings fixed before commit. The suite is **308 tests,
+0 failures**, green on **macOS and Linux** (plus an iOS build in CI).
+
+### Fork vs. upstream at a glance
+
+| Area | Upstream `nats.swift` (v0.4.0+) | This fork (`firstclass-kv`) |
+| --- | --- | --- |
+| Core NATS — pub/sub, req/reply, headers, auth, TLS, WebSocket, lame-duck | Yes | Yes |
+| In-memory credentials, `ignoreDiscoveredServers()` | File creds only | Yes |
+| Connection ergonomics — `waitForConnected`, `state`/`isConnected`, `unlimitedReconnects` | No | Yes |
+| JetStream publish | Sync only | Sync + **async batched** publish |
+| JetStream CAS publish (expected-last-seq, msg-id dedup) | **Broken** (acks mis-decoded) | **Fixed** |
+| Pull consumer | Single-shot `fetch` | `fetch` + `consume`/`messages`/`next` |
+| Push consumer | No | Ephemeral, **durable**, queue/deliver-group |
+| Ordered push consumer | No | Yes — reset engine, no-loss/no-dup |
+| KeyValue store | No | Full — CAS, `watch`/`keys`/`history`/`purge`, per-key TTL |
+| ObjectStore | No | Full — chunked + **streaming**, SHA-256 digests, `watch`/`list` |
+| Per-message / per-key TTL (NATS 2.11+) | No | Yes |
+| Service (micro) API | No | Yes — the `Services` module |
+| Swift 6 language mode | No | Yes — strict concurrency as errors |
+| Linux | No (CI is macOS/iOS only) | Yes — builds + 308/308 tests |
+| Slow-consumer handling | Silent drop, O(n²) drain | `.error` event, amortized-O(1) buffer |
+| Tooling | macOS/iOS + lint CI | + Linux build/test CI, DocC, `PerfBench` |
+
+The initial fifteen features, in commit order:
 
 | Commit | Feature |
 | --- | --- |
@@ -133,6 +157,43 @@ tested, not just feature-completed:
   optimistic KV CAS (a regression guard for the `AckFuture` bug below). All green
   and non-flaky across repeated runs.
 
+### Further hardening and platform work
+
+Beyond the initial surface, several passes brought it to production polish:
+
+- **Reconnect resilience** — a KV watch (ordered consumer) now recovers across a
+  full server bounce in <1s (was ~10s: it used to wait out the missed-heartbeat
+  timeout); contiguous `[1…400]` delivery across a real disconnect/reconnect is
+  asserted in the suite.
+- **Async batched publish** — `publishAsync`/`publishAsyncPending`/
+  `publishAsyncComplete` with a bounded in-flight window and a single background
+  reaper (~2.8× the sync publish throughput).
+- **Per-message hot-path fixes** — pull-fetch and ordered-accept paths shed
+  per-message task-group / metadata allocations (pull `consume` ~2.3×, ordered
+  ~2×), on top of the ~7× push-with-heartbeat fix above.
+- **A silent-failure audit** — fixed four real swallowed-error paths (ObjectStore
+  read hang on a deleted object, KV `purgeDeletes` failing open, `Services` loops
+  swallowing subscription errors, pull-fetch masking unknown 409s).
+- **DocC catalogs** for `Nats`/`JetStream`/`Services` (landing pages, curated
+  topics, getting-started/KV/ObjectStore/AsyncPublish articles) with zero
+  in-scope symbol warnings.
+- **Slow-consumer correctness** — a subscription-buffer overflow now fires
+  `SubscriptionError.slowConsumer` via `.error` (was a silent drop) and the buffer
+  drains in amortized O(1) (a `FIFOBuffer`, replacing an O(n²) `removeFirst()`
+  drain); tunable via `subscriptionCapacity(_:)`.
+- **Semi-manual runbooks** — a `Scenarios` executable plus runbooks for a 3-node
+  R3 cluster (verified real leader-kill failover), fault injection (toxiproxy:
+  full cut, latency, bandwidth, lame-duck).
+- **CI** — GitHub Actions for macOS build+test, iOS build, Linux (`swift:6.2`)
+  build+test, swift-format lint, and DocC.
+- **Linux support** — the client was macOS/iOS-only (CryptoKit, a dead `Combine`
+  import, and `URLSession` file reads are all Apple-only). CryptoKit is now
+  guarded behind `Crypto` (swift-crypto), the `Combine` import is gone,
+  credential/nkey files are read with `Data(contentsOf:)` (`URLSession` rejects
+  `file://` on swift-corelibs-foundation), and `swift-sodium` is pinned to 0.9.x
+  so it builds against the stable libsodium (1.0.18) on Linux distros. Verified in
+  a `swift:6.2` container: 308/308, identical to macOS.
+
 ## A bug fixed for everyone, not just KV
 
 Implementing KV's optimistic concurrency surfaced a latent bug in the base
@@ -159,15 +220,17 @@ sequentially, which set the pace more than the difficulty did.
 
 ### By the numbers
 
-- **23 commits**: the KV store, the ordered/push consumer engine, the public
-  consumer API, the ObjectStore (incl. streaming IO), the `Services` module,
-  per-message + KV TTL, durable/queue-group push consumers, the Swift 6 language-
-  mode adoption, and the performance/chaos hardening (harness, suite, hot-path
-  fix).
-- **287 tests, 0 failures** against a real `nats-server`, including
-  bidirectional `nats`-CLI interop for KV/ObjectStore/Services, deterministic
-  reset/recovery tests (delete the consumer mid-watch → resume with no gap or
-  dup), and leak tests each shown to fail without their fix.
+- **47 commits** on `firstclass-kv`: the KV store, the ordered/push consumer
+  engine, the public consumer API, the ObjectStore (incl. streaming IO), the
+  `Services` module, per-message + KV TTL, durable/queue-group push consumers,
+  async batched publish, the Swift 6 language-mode adoption, the performance/chaos
+  hardening (harness, suite, hot-path fixes), reconnect resilience, a
+  silent-failure audit, DocC catalogs, semi-manual cluster/fault/probe runbooks,
+  CI, and Linux support.
+- **308 tests, 0 failures** against a real `nats-server`, green on **macOS and
+  Linux**, including bidirectional `nats`-CLI interop for KV/ObjectStore/Services,
+  deterministic reset/recovery tests (delete the consumer mid-watch → resume with
+  no gap or dup), and leak/regression tests each shown to fail without their fix.
 
 ## What remains for full "first-class general-purpose"
 
@@ -183,6 +246,11 @@ niche parity/throughput work, not a first-class blocker:
 2. **Overlapping-pull throughput optimization** for the pull `consume`/`messages`
    path — the current sequential batch loop is correct, just not maximally
    pipelined.
+3. **The ordered consumer's ~50k msgs/s ceiling** — its public consume path funnels
+   the reset engine's stream through a second mailbox (two async queues vs one for
+   pull/push). Collapsing it touches the unified-mailbox delivery keystone; KV/Object
+   watch (ordered's primary use) reads the engine directly and is low-throughput, so
+   this is deferred as higher-risk, lower-value.
 
 ## Recommendation: upstream, don't fork
 

@@ -4,10 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-NATS.swift is a Swift client library for the NATS messaging system, providing asynchronous messaging capabilities for Swift applications across macOS and iOS platforms. The project consists of three main modules:
+NATS.swift is a Swift client library for the NATS messaging system, providing asynchronous messaging capabilities for Swift applications across macOS, iOS, and Linux. The project consists of four modules:
 - **Nats**: Core NATS functionality including pub/sub, request/reply, auth, TLS
-- **JetStream**: Advanced streaming capabilities (work in progress)
+- **JetStream**: JetStream streaming — KeyValue and ObjectStore stores, pull/push/ordered consumers, per-message and per-key TTL, and async batched publish
+- **Services**: the NATS micro Service API (endpoints/groups, `$SRV` discovery, per-endpoint stats)
 - **NatsServer**: Test server utilities for integration testing
+
+This is the `firstclass-kv` branch, which extends upstream `nats.swift` (Core NATS only) with the full JetStream + Services surface above and builds under the Swift 6 language mode. See `FIRSTCLASS.md` for the fork-vs-upstream matrix.
 
 ## Build and Test Commands
 
@@ -35,6 +38,10 @@ swift package clean
 # Install nats-server (required for integration tests)
 curl --fail https://binaries.nats.dev/nats-io/nats-server/v2@latest | PREFIX='/usr/local/bin' sh
 
+# Linux only: nkeys.swift -> swift-sodium links the system libsodium, and the nats
+# installers need curl (the swift Docker image ships neither).
+# apt-get update && apt-get install -y libsodium-dev curl
+
 # Lint (strict)
 swift-format lint --configuration .swift-format -r --strict Sources Tests
 
@@ -52,7 +59,13 @@ swift-format format --in-place --configuration .swift-format -r Sources Tests
 
 **NatsMessage** & **NatsSubscription**: Message handling and subscription management with support for headers and wildcards. Subscriptions implement `AsyncSequence` for message iteration.
 
-**JetStreamContext** (`Sources/JetStream/JetStreamContext.swift`): Entry point for JetStream operations, manages streams and consumers with configurable prefixes/domains.
+**JetStreamContext** (`Sources/JetStream/JetStreamContext.swift`): Entry point for JetStream operations, manages streams and consumers with configurable prefixes/domains; also hosts async batched publish (`publishAsync`).
+
+**KeyValue / ObjectStore** (`Sources/JetStream/KeyValue*.swift`, `Sources/JetStream/ObjectStore*.swift`): the two JetStream-backed stores, both wire-compatible with the NATS ecosystem (bidirectional `nats`-CLI interop tested).
+
+**OrderedConsumer** (`Sources/JetStream/OrderedConsumer*.swift`): the reset-engine push consumer (mirrors nats.go `checkOrderedMsgs`/`resetOrderedConsumer`) that backs KV/Object watch and the public `consume`/`messages`/`next` API — one engine, not four.
+
+**Service** (`Sources/Services/Service.swift`): actor-based micro Service — endpoints/groups, `$SRV` PING/INFO/STATS discovery, per-endpoint stats.
 
 ### Key Design Patterns
 
@@ -67,8 +80,8 @@ swift-format format --in-place --configuration .swift-format -r Sources Tests
 The client supports multiple authentication mechanisms configured through `NatsClientOptions`:
 - Username/password
 - Token authentication
-- NKEY authentication
-- JWT with credentials file
+- NKEY authentication (nkey file or seed)
+- JWT with a credentials file or an in-memory credentials string (no temp file)
 - TLS mutual authentication
 
 ### Testing Infrastructure
@@ -80,8 +93,9 @@ Integration tests use `NatsServer` helper to spawn local NATS server instances w
 - **swift-nio**: Asynchronous event-driven network framework
 - **swift-nio-ssl**: TLS support
 - **swift-log**: Structured logging
-- **nkeys.swift**: NKEY cryptographic operations
+- **nkeys.swift**: NKEY cryptographic operations (pulls in `swift-sodium`, pinned to 0.9.x so it builds against the stable libsodium 1.0.18 on Linux distros)
 - **swift-nuid**: Unique identifier generation
+- **swift-crypto**: the `Crypto` module (SHA-256), used only on Linux as the fallback for Apple's CryptoKit in ObjectStore digest verification
 
 ## Coding Style
 
@@ -91,7 +105,9 @@ Integration tests use `NatsServer` helper to spawn local NATS server instances w
 
 ## Development Notes
 
-- Minimum deployment targets: macOS 13.0, iOS 13.0
-- Swift 5.7+ required
+- Platforms: macOS 13.0+, iOS 13.0+, and Linux (glibc). Linux needs the system libsodium (`libsodium-dev`) for the nkeys.swift dependency.
+- Requires a Swift 6.0+ toolchain; the package builds in the Swift 6 language mode (`swiftLanguageModes: [.v6]`) with strict concurrency enforced as errors.
 - WebSocket upgrade support available for browser-compatible connections
 - Batch message processing optimized with `BatchBuffer` for performance
+- CI (`.github/workflows/ci.yml`): macOS build + test, iOS build, Linux (`swift:6.2` container) build + test, swift-format lint, and DocC build. The full suite (308 tests) passes on both macOS and Linux.
+- Cross-platform note: CryptoKit / Combine / `URLSession` file reads are Apple-only; use `#if canImport(CryptoKit)` + `Crypto`, avoid Combine, and read local files with `Data(contentsOf:)` (see `Sources/JetStream/ObjectStore.swift` and `Sources/Nats/NatsConnection.swift`).
