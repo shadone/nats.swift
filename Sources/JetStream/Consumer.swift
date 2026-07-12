@@ -13,22 +13,34 @@
 
 import CryptoKit
 import Foundation
+import NIOConcurrencyHelpers
 import Nuid
 
-public class Consumer {
+/// A pull-consumer handle.
+///
+/// `@unchecked Sendable`: `ctx` is a `Sendable` ``JetStreamContext`` and the only mutable state is
+/// `info`, guarded by a `NIOLockedValueBox`. Every read and write is serialized (the lock is never
+/// held across an `await`), so a `Consumer` handle can be shared across concurrency domains
+/// data-race-free.
+public final class Consumer: @unchecked Sendable {
 
     private static let rdigits: [UInt8] = Array(
         "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".utf8)
 
+    private let _info: NIOLockedValueBox<ConsumerInfo>
+
     /// Contains information about the consumer.
     /// Note that this may be out of date and reading it does not query the server.
     /// For up-to-date stream info use ``Consumer/info()``
-    public internal(set) var info: ConsumerInfo
+    public internal(set) var info: ConsumerInfo {
+        get { _info.withLockedValue { $0 } }
+        set { _info.withLockedValue { $0 = newValue } }
+    }
     internal let ctx: JetStreamContext
 
     init(ctx: JetStreamContext, info: ConsumerInfo) {
         self.ctx = ctx
-        self.info = info
+        self._info = NIOLockedValueBox(info)
     }
 
     /// Retrieves information about the consumer

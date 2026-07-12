@@ -36,6 +36,30 @@ final class PullConsumeTests: XCTestCase {
         return (client, ctx, consumer)
     }
 
+    /// A `Consumer` handle is `Sendable`: a single handle can be captured by multiple concurrent
+    /// tasks. This exercises the lock-guarded `info` under concurrency — before the handle became
+    /// Sendable this capture would not compile under Swift 6, and the mutable `info` var refreshed by
+    /// concurrent `info()` calls would be a data race.
+    func testConsumerHandleSharedAcrossTasks() async throws {
+        let (client, _, consumer) = try await setup()
+        defer { Task { try? await client.close() } }
+
+        try await withThrowingTaskGroup(of: String.self) { group in
+            for _ in 0..<8 {
+                group.addTask {
+                    var name = ""
+                    for _ in 0..<10 {
+                        name = try await consumer.info().name
+                    }
+                    return name
+                }
+            }
+            for try await name in group {
+                XCTAssertEqual(name, "pull", "shared handle must return consistent info under load")
+            }
+        }
+    }
+
     /// consume(handler:) receives every published message; stop() then closes cleanly.
     func testConsumeReceivesAllMessages() async throws {
         let (client, ctx, consumer) = try await setup()
