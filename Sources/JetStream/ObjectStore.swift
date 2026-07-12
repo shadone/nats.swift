@@ -466,6 +466,16 @@ public final class ObjectStore: Sendable {
             deliverPolicy: .all)
         try await consumer.start()
 
+        // A non-empty object whose chunk subject has no pending messages — e.g. the object was
+        // deleted or overwritten after `getInfo` resolved — would never deliver a chunk, so the read
+        // loop below (which ends only on an in-band `pending == 0`) would hang forever. Fail fast on
+        // the empty set. (`size == 0` was handled above, so zero pending here means the chunks are
+        // gone.)
+        if await consumer.initialPending() == 0 {
+            await consumer.stop()
+            throw JetStreamError.ObjectStoreError.objectNotFound
+        }
+
         var assembled = Data()
         var hasher = SHA256()
         do {

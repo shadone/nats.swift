@@ -216,6 +216,50 @@ class ObjectStoreTests: XCTestCase {
         }
     }
 
+    private enum ReadOutcome: Equatable {
+        case failedFast
+        case returned
+        case timedOut
+    }
+
+    /// A read of an object whose META still reports chunks, but whose chunk subject has been purged
+    /// (the state a concurrent delete/overwrite leaves between `getInfo` resolving and the read
+    /// subscribing), must FAIL FAST with `objectNotFound` rather than hang forever waiting for chunks
+    /// that will never arrive. Regression test for the missing-chunks wedge.
+    func testGetWithMissingChunksFailsFastInsteadOfHanging() async throws {
+        let (client, ctx) = try await connectedContext()
+        defer { Task { try? await client.close() } }
+
+        let obs = try await ctx.createObjectStore(cfg: ObjectStoreConfig(bucket: "hang"))
+        let info = try await obs.put("k", data: Data("payload".utf8))
+
+        // Purge the chunk subject directly, leaving the meta (size > 0, chunks > 0) intact.
+        let streamHandle = try await ctx.getStream(name: "OBJ_hang")
+        let stream = try XCTUnwrap(streamHandle)
+        _ = try await stream.purge(subject: "$O.hang.C.\(info.nuid)")
+
+        // Race the read against a timeout: a regression to the hang fails here rather than wedging
+        // the whole suite.
+        let outcome = try await withThrowingTaskGroup(of: ReadOutcome.self) { group in
+            group.addTask {
+                do {
+                    _ = try await obs.getBytes("k")
+                    return .returned
+                } catch JetStreamError.ObjectStoreError.objectNotFound {
+                    return .failedFast
+                }
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: 8_000_000_000)
+                return .timedOut
+            }
+            defer { group.cancelAll() }
+            return try await group.next()!
+        }
+        XCTAssertEqual(
+            outcome, .failedFast, "get must fail fast on missing chunks, not hang or return")
+    }
+
     func testOpenMissingBucketThrowsBucketNotFound() async throws {
         let (client, ctx) = try await connectedContext()
         defer { Task { try? await client.close() } }

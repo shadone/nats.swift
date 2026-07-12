@@ -325,7 +325,10 @@ public actor Service {
                 }
             }
         } catch {
-            // Subscription completed or errored; the loop ends.
+            // Only a real, thrown subscription error reaches here — a clean unsubscribe / connection
+            // close ends the `for await` by returning nil, without throwing. Surface it (e.g. a
+            // mid-stream permissions violation) instead of letting the control verb silently go dark.
+            errorHandler?(error)
         }
     }
 
@@ -342,7 +345,10 @@ public actor Service {
                     index: index, elapsedNs: Int64(elapsed), respondError: request.respondError)
             }
         } catch {
-            // Subscription completed or errored; the loop ends.
+            // Only a real, thrown subscription error reaches here — a clean unsubscribe / connection
+            // close ends the `for await` by returning nil, without throwing. Surface it instead of
+            // letting the endpoint silently stop serving with no signal.
+            errorHandler?(error)
         }
     }
 }

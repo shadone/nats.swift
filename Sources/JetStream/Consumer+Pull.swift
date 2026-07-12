@@ -156,6 +156,12 @@ public class FetchResult: AsyncSequence {
                         throw JetStreamError.FetchError.consumerDeleted
                     } else if descLower.contains("consumer is push based") {
                         throw JetStreamError.FetchError.consumerIsPush
+                    } else {
+                        // Any other 409 reason (newer servers add more, e.g. exceeded MaxWaiting /
+                        // MaxRequestBatch): surface it. Falling through here instead would return to a
+                        // read on the already-unsubscribed subscription and mask the real reason as
+                        // `subscriptionClosed`.
+                        throw JetStreamError.FetchError.unknownStatus(status, message.description)
                     }
                 default:
                     throw JetStreamError.FetchError.unknownStatus(status, message.description)

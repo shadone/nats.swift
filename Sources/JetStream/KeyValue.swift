@@ -355,12 +355,18 @@ public final class KeyValue: Sendable {
 
         for entry in entries where entry.operation == .delete || entry.operation == .purge {
             let subject = KeyValueCoding.subject(forBucket: bucket, key: entry.key)
-            if let limit, let created = KeyValueCoding.date(fromRFC3339: entry.created),
-                created > limit
-            {
-                // Marker is younger than the limit: keep it, roll up its history.
-                _ = try await stream.purge(keep: 1, subject: subject)
+            if let limit {
+                // Age-bounded purge: only fully remove a marker we can PROVE is older than the limit.
+                // A marker younger than the limit — OR one whose `created` timestamp fails to parse —
+                // is kept (roll up history), so a malformed timestamp fails closed rather than
+                // silently escalating to an unrecoverable full purge inside the protection window.
+                if let created = KeyValueCoding.date(fromRFC3339: entry.created), created <= limit {
+                    _ = try await stream.purge(subject: subject)
+                } else {
+                    _ = try await stream.purge(keep: 1, subject: subject)
+                }
             } else {
+                // No age bound (olderThan == 0): purge the marker outright.
                 _ = try await stream.purge(subject: subject)
             }
         }

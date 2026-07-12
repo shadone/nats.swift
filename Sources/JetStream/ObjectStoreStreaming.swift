@@ -363,6 +363,14 @@ public final class ObjectStreamReader: AsyncSequence, @unchecked Sendable {
             continuation.finish(throwing: error)
             throw error
         }
+        // A non-empty object with no pending chunks (deleted/overwritten after getInfo) would never
+        // deliver a chunk, wedging the pump forever. Fail fast — thrown here, which getStream awaits.
+        if await consumer.initialPending() == 0 {
+            await consumer.stop()
+            let error = JetStreamError.ObjectStoreError.objectNotFound
+            continuation.finish(throwing: error)
+            throw error
+        }
         let task = Task { [consumer, continuation, client, expectedDigest, expectedSize] in
             await ObjectStreamReader.pump(
                 consumer: consumer,
