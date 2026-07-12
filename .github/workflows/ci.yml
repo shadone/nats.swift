@@ -8,28 +8,52 @@ on:
 
 jobs:
   macos:
+    name: macOS build + test (nats-server ${{ matrix.nats_server }})
     runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        # The suite needs nats-server >= 2.11 (per-message TTL / subject-delete markers).
+        # Add older pinned versions here once verified against them.
+        nats_server: [ latest ]
     steps:
     - name: Checkout the code
       uses: actions/checkout@v4
     - name: Install nats-server
-      run: curl --fail https://binaries.nats.dev/nats-io/nats-server/v2@latest | PREFIX='/usr/local/bin' sh
-    - name: Check nats-server version
-      run: nats-server -v
-    - name: List schemes
-      run: xcodebuild -list
-    - name: Build
-      run: xcodebuild build -scheme Nats -destination 'platform=macOS,arch=arm64'
+      run: curl --fail https://binaries.nats.dev/nats-io/nats-server/v2@${{ matrix.nats_server }} | PREFIX='/usr/local/bin' sh
+    - name: Install nats CLI
+      # The wire-compat interop tests (KV / ObjectStore / Services) shell out to `nats`.
+      # Without it they XCTSkip; installing it makes them actually run.
+      run: brew install nats-io/nats-tools/nats
+    - name: Versions
+      run: |
+        swift --version
+        nats-server -v
+        nats --version
+    - name: Build (debug, all targets)
+      run: swift build
+    - name: Build (release)
+      run: swift build -c release
     - name: Test
       run: swift test
+
   ios:
+    name: iOS build
     runs-on: macos-15
     steps:
     - name: Checkout the code
       uses: actions/checkout@v4
-    - name: Build
-      run: xcodebuild build -scheme Nats -destination generic/platform=ios
-  check-linter:
+    - name: List schemes
+      run: xcodebuild -list
+    - name: Build library products for iOS
+      run: |
+        for scheme in Nats JetStream Services; do
+          echo "== iOS build: $scheme =="
+          xcodebuild build -scheme "$scheme" -destination generic/platform=iOS
+        done
+
+  lint:
+    name: swift-format lint
     runs-on: macos-15
     steps:
     - name: Checkout the code
@@ -38,3 +62,18 @@ jobs:
       run: brew install swift-format
     - name: Run check
       run: swift-format lint --configuration .swift-format -r --strict Sources Tests
+
+  docs:
+    name: DocC build
+    runs-on: macos-15
+    steps:
+    - name: Checkout the code
+      uses: actions/checkout@v4
+    - name: Build documentation (Nats, JetStream, Services)
+      # Verifies the DocC catalogs + symbol graphs build with no unresolved references.
+      run: |
+        for target in Nats JetStream Services; do
+          echo "== DocC: $target =="
+          swift package --allow-writing-to-directory ./docc-out \
+            generate-documentation --target "$target"
+        done
