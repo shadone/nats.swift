@@ -1,0 +1,83 @@
+# Docker equivalent of the three local nats-server processes started by
+# cluster-up.sh. Prefer the shell scripts (the no-docker path) when the Docker
+# daemon is unavailable; this compose file is provided for convenience.
+#
+#   docker compose -f Sources/Scenarios/cluster/docker-compose.yml up -d
+#   swift run Scenarios cluster        # connects to all three seeds
+#   docker compose -f Sources/Scenarios/cluster/docker-compose.yml down -v
+#
+# Each service is one node of cluster "JSC" with JetStream enabled and the full
+# routes list, matching the ports the scenario/runbook expect:
+#   n1 -> localhost:4222, n2 -> localhost:4223, n3 -> localhost:4224
+#
+# Note: routes use the in-network service names (n1/n2/n3:6222), while client
+# seed URLs are the host-published 127.0.0.1:4222-4224 ports.
+
+services:
+  n1:
+    image: nats:2.12
+    command:
+      - "-js"
+      - "-sd"
+      - "/data"
+      - "-server_name"
+      - "n1"
+      - "-p"
+      - "4222"
+      - "-cluster_name"
+      - "JSC"
+      - "-cluster"
+      - "nats://0.0.0.0:6222"
+      - "-routes"
+      - "nats://n1:6222,nats://n2:6222,nats://n3:6222"
+    ports:
+      - "4222:4222"
+    volumes:
+      - n1-data:/data
+
+  n2:
+    image: nats:2.12
+    command:
+      - "-js"
+      - "-sd"
+      - "/data"
+      - "-server_name"
+      - "n2"
+      - "-p"
+      - "4222"
+      - "-cluster_name"
+      - "JSC"
+      - "-cluster"
+      - "nats://0.0.0.0:6222"
+      - "-routes"
+      - "nats://n1:6222,nats://n2:6222,nats://n3:6222"
+    ports:
+      - "4223:4222"
+    volumes:
+      - n2-data:/data
+
+  n3:
+    image: nats:2.12
+    command:
+      - "-js"
+      - "-sd"
+      - "/data"
+      - "-server_name"
+      - "n3"
+      - "-p"
+      - "4222"
+      - "-cluster_name"
+      - "JSC"
+      - "-cluster"
+      - "nats://0.0.0.0:6222"
+      - "-routes"
+      - "nats://n1:6222,nats://n2:6222,nats://n3:6222"
+    ports:
+      - "4224:4222"
+    volumes:
+      - n3-data:/data
+
+volumes:
+  n1-data:
+  n2-data:
+  n3-data:

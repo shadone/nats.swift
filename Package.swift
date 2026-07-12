@@ -81,7 +81,7 @@ let package = Package(
         .executableTarget(name: "PerfBench", dependencies: ["Nats", "JetStream"]),
         .executableTarget(
             name: "Scenarios", dependencies: ["Nats", "JetStream", "Services"],
-            exclude: ["README.md"]),
+            exclude: ["README.md", "CLUSTER.md", "cluster"]),
     ],
     swiftLanguageModes: [.v6]
 )
