@@ -37,6 +37,37 @@ jobs:
     - name: Test
       run: swift test
 
+  linux:
+    name: Linux build + test (Swift ${{ matrix.swift }})
+    runs-on: ubuntu-latest
+    container: swift:${{ matrix.swift }}
+    strategy:
+      fail-fast: false
+      matrix:
+        swift: [ "6.2" ]
+    steps:
+    - name: Checkout the code
+      uses: actions/checkout@v4
+    - name: Install build prerequisites (libsodium, curl)
+      # nkeys.swift -> swift-sodium links the system libsodium (the swift image lacks its headers);
+      # the nats binary installers below need curl, which the swift image does not ship.
+      run: |
+        apt-get update -qq
+        apt-get install -y -qq libsodium-dev curl
+    - name: Install nats-server and nats CLI
+      run: |
+        curl --fail https://binaries.nats.dev/nats-io/nats-server/v2@latest | PREFIX='/usr/local/bin' sh
+        curl --fail https://binaries.nats.dev/nats-io/natscli/nats@latest | PREFIX='/usr/local/bin' sh
+    - name: Versions
+      run: |
+        swift --version
+        nats-server -v
+        nats --version
+    - name: Build
+      run: swift build
+    - name: Test
+      run: swift test
+
   ios:
     name: iOS build
     runs-on: macos-15
