@@ -18,6 +18,48 @@ import XCTest
 
 final class OrderedConsumerUnitTests: XCTestCase {
 
+    // MARK: - parseAckFields (hot-path metadata extraction)
+
+    /// The fast-path extractor must agree with the full `MessageMetadata` parser on the three fields
+    /// the accept-check consults (stream seq, deliver/consumer seq, consumer-name serial), for both
+    /// the v1 (7-token) and v2 (9-token) `$JS.ACK.*` layouts.
+    func testParseAckFieldsMatchesMetadata() throws {
+        let cases: [(subject: String, serial: Int?)] = [
+            // v1: stream.consumer.delivered.streamSeq.consumerSeq.timestamp.pending
+            ("$JS.ACK.MYSTREAM.cons_9.1.42.7.1700000000000000000.3", 9),
+            // v2: domain.account.stream.consumer.delivered.streamSeq.consumerSeq.timestamp.pending
+            ("$JS.ACK.dom.ACCTHASH.MYSTREAM.cons_5.1.42.7.1700000000000000000.3", 5),
+            // Consumer name with no `_<n>` suffix → serial nil, sequences still parse.
+            ("$JS.ACK.MYSTREAM.plainname.1.42.7.1700000000000000000.3", nil),
+        ]
+        for (subject, expectedSerial) in cases {
+            let parsed = try XCTUnwrap(
+                OrderedConsumer.parseAckFields(subject), "should parse \(subject)")
+            let tokens = subject.dropFirst("$JS.ACK.".count).split(separator: ".")
+            let meta = try MessageMetadata(tokens: Array(tokens))
+            XCTAssertEqual(parsed.streamSeq, meta.streamSequence, "streamSeq for \(subject)")
+            XCTAssertEqual(parsed.deliverSeq, meta.consumerSequence, "deliverSeq for \(subject)")
+            XCTAssertEqual(parsed.serial, expectedSerial, "serial for \(subject)")
+        }
+    }
+
+    /// Any subject that isn't a well-formed ack must return `nil` (the old `try? …metadata()` "ignore
+    /// on parse failure" behavior).
+    func testParseAckFieldsRejectsMalformed() {
+        let bad = [
+            "not.a.js.ack.subject",  // wrong prefix
+            "$JS.ACK.too.few.tokens",  // 3 tokens
+            "$JS.ACK.a.b.c.d.e.f.g.h",  // 8 tokens (neither v1=7 nor v2>=9)
+            "$JS.ACK.MYSTREAM.cons.1.NOTANUM.7.ts.3",  // non-numeric stream seq (v1)
+            "$JS.ACK.MYSTREAM.cons_1.BADTOK.42.7.ts.3",  // non-numeric `delivered`, valid seqs (v1)
+            "$JS.ACK.MYSTREAM.cons_1.1.42.7.ts.BADTOK",  // non-numeric `pending`, valid seqs (v1)
+        ]
+        for subject in bad {
+            XCTAssertNil(OrderedConsumer.parseAckFields(subject), "must reject \(subject)")
+        }
+        XCTAssertNil(OrderedConsumer.parseAckFields(nil), "nil subject must return nil")
+    }
+
     // MARK: - ConsumerConfig push-field JSON round-trip
 
     func testPushFieldsEncodeWhenSet() throws {

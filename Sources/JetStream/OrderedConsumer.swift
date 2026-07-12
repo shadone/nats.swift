@@ -306,22 +306,76 @@ public actor OrderedConsumer {
     /// cursor and yields; on a gap it discards WITHOUT advancing `streamSeq` so the recreate resumes
     /// from `streamSeq + 1` and redelivers the missed message.
     internal func handleData(_ msg: NatsMessage) -> DataDecision {
-        guard let meta = try? JetStreamMessage(message: msg, client: ctx.client).metadata() else {
+        // Hot path: extract only the three fields the accept-check needs directly from the reply
+        // subject, rather than building a full `MessageMetadata` (which also allocates strings for
+        // domain/account/stream/timestamp and parses delivered/pending) and a throwaway
+        // `JetStreamMessage` per message.
+        guard let parsed = OrderedConsumer.parseAckFields(msg.replySubject) else {
             return .ignored
         }
         // Ignore stray messages from a previous consumer generation.
-        if let messageSerial = OrderedConsumer.serial(fromConsumerName: meta.consumer),
-            messageSerial != serial
-        {
+        if let messageSerial = parsed.serial, messageSerial != serial {
             return .ignored
         }
-        switch cursor.evaluate(deliverSeq: meta.consumerSequence, streamSeq: meta.streamSequence) {
+        switch cursor.evaluate(deliverSeq: parsed.deliverSeq, streamSeq: parsed.streamSeq) {
         case .accept:
             continuation.yield(msg)
             return .yielded
         case .gap:
             return .gap
         }
+    }
+
+    /// Extracts the consumer-name serial, deliver (consumer) sequence and stream sequence from a
+    /// `$JS.ACK.*` reply subject — the only metadata the accept-check consults. Token layout mirrors
+    /// ``MessageMetadata``: v2 (`domain.account.stream.consumer.delivered.sseq.cseq.tm.pending`, ≥9
+    /// tokens) or v1 (`stream.consumer.delivered.sseq.cseq.tm.pending`, exactly 7). Returns `nil` for
+    /// any subject that isn't a well-formed ack — matching the old `try? …metadata()` "ignore on parse
+    /// failure" behavior. `serial` is `nil` when the consumer name carries no `_<n>` suffix (also
+    /// matching the old code, which then does not filter on serial).
+    internal static func parseAckFields(
+        _ replySubject: String?
+    ) -> (serial: Int?, deliverSeq: UInt64, streamSeq: UInt64)? {
+        let prefix = "$JS.ACK."
+        guard let subject = replySubject, subject.hasPrefix(prefix) else {
+            return nil
+        }
+        // Split exactly as `MessageMetadata` parsing does (default omits empty subsequences) so the
+        // token count / indexing — and thus the "ignore on parse failure" behavior — is identical.
+        let tokens = subject.dropFirst(prefix.count).split(separator: ".")
+        let consumerTok: Substring
+        let deliveredTok: Substring
+        let streamSeqTok: Substring
+        let deliverSeqTok: Substring
+        let pendingTok: Substring
+        if tokens.count >= 9 {
+            consumerTok = tokens[3]
+            deliveredTok = tokens[4]
+            streamSeqTok = tokens[5]
+            deliverSeqTok = tokens[6]
+            pendingTok = tokens[8]
+        } else if tokens.count == 7 {
+            consumerTok = tokens[1]
+            deliveredTok = tokens[2]
+            streamSeqTok = tokens[3]
+            deliverSeqTok = tokens[4]
+            pendingTok = tokens[6]
+        } else {
+            return nil
+        }
+        // Validate the SAME four numeric tokens `MessageMetadata` does (delivered, stream seq, consumer
+        // seq, pending), so any subject the full parser would have rejected is likewise ignored here —
+        // even though only stream/consumer seq are consumed downstream. This keeps the "ignore on parse
+        // failure" behavior byte-for-byte.
+        guard UInt64(deliveredTok) != nil, let streamSeq = UInt64(streamSeqTok),
+            let deliverSeq = UInt64(deliverSeqTok), UInt64(pendingTok) != nil
+        else {
+            return nil
+        }
+        // Reimplements the old `serial(fromConsumerName:)` on the `Substring` to avoid a per-message
+        // String allocation.
+        let serial = consumerTok.split(separator: "_").last.flatMap { Int($0) }
+        return (serial, deliverSeq, streamSeq)
     }
 
     /// The heartbeat sequence-mismatch check (mirrors nats.go `checkForSequenceMismatch`): if the
@@ -422,14 +476,6 @@ public actor OrderedConsumer {
 
     /// Number of replicas for a recreated ordered consumer (always single-replica ephemeral).
     private static let recreateReplicas = 1
-
-    /// Extracts the serial suffix from a consumer name of the form `<prefix>_<serial>`.
-    private static func serial(fromConsumerName name: String) -> Int? {
-        guard let last = name.split(separator: "_").last, let value = Int(last) else {
-            return nil
-        }
-        return value
-    }
 
     private func deleteConsumerBestEffort(_ name: String?) {
         guard let name else {
