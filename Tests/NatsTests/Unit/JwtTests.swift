@@ -31,7 +31,9 @@ class JwtTests: XCTestCase {
         let currentFile = URL(fileURLWithPath: #filePath)
         let testDir = currentFile.deletingLastPathComponent().deletingLastPathComponent()
         let resourceURL = testDir.appendingPathComponent("Integration/Resources/TestUser.creds")
-        let credsData = try await URLSession.shared.data(from: resourceURL).0
+        // Read the local creds file with `Data(contentsOf:)` rather than `URLSession`: the latter
+        // does not support `file://` URLs on swift-corelibs-foundation (Linux) and crashes there.
+        let credsData = try Data(contentsOf: resourceURL)
 
         let nkey = String(data: JwtUtils.parseDecoratedNKey(contents: credsData)!, encoding: .utf8)
         let expectedNkey = "SUACH75SWCM5D2JMJM6EKLR2WDARVGZT4QC6LX3AGHSWOMVAKERABBBRWM"

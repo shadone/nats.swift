@@ -11,11 +11,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import CryptoKit
 import JetStream
 import Nats
 import NatsServer
 import XCTest
+
+#if canImport(CryptoKit)
+    import CryptoKit
+#else
+    import Crypto
+#endif
 
 class ObjectStoreTests: XCTestCase {
 

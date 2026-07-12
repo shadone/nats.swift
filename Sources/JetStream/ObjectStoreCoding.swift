@@ -11,9 +11,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import CryptoKit
 import Foundation
 import Nats
+
+#if canImport(CryptoKit)
+    import CryptoKit
+#else
+    import Crypto
+#endif
 
 /// Pure mapping and parsing helpers for the object-store wire conventions, factored out
 /// of ``ObjectStore`` so they are unit-testable without a running server.

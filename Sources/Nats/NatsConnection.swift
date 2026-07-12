@@ -576,7 +576,9 @@ final class ConnectionHandler: ChannelInboundHandler, Sendable {
             initialConnect.signature = base64sig
             initialConnect.userJwt = jwt
         } else if let auth = self.auth, let credentialsPath = auth.credentialsPath {
-            let credentials = try await URLSession.shared.data(from: credentialsPath).0
+            // `credentialsFile`/`nkeyFile` are local files. Read them with `Data(contentsOf:)`:
+            // `URLSession` does not support `file://` URLs on swift-corelibs-foundation (Linux).
+            let credentials = try Data(contentsOf: credentialsPath)
             guard let jwt = JwtUtils.parseDecoratedJWT(contents: credentials) else {
                 throw NatsError.ConnectError.invalidConfig(
                     "failed to extract JWT from credentials file")
@@ -596,7 +598,7 @@ final class ConnectionHandler: ChannelInboundHandler, Sendable {
             initialConnect.userJwt = String(data: jwt, encoding: .utf8)!
         }
         if let nkey = self.auth?.nkeyPath {
-            let nkeyData = try await URLSession.shared.data(from: nkey).0
+            let nkeyData = try Data(contentsOf: nkey)
 
             guard let nkeyContent = String(data: nkeyData, encoding: .utf8) else {
                 throw NatsError.ConnectError.invalidConfig("failed to read NKEY file")

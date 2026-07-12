@@ -11,10 +11,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import CryptoKit
 import Foundation
 import Nats
 import Nuid
+
+#if canImport(CryptoKit)
+    import CryptoKit
+#else
+    import Crypto
+#endif
 
 // Streaming object-store I/O: put an object from an `AsyncSequence<Data>` without ever
 // buffering the whole object in memory, and get an object as an `AsyncSequence` of its

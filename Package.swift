@@ -21,6 +21,16 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.0.0"),
         .package(url: "https://github.com/Jarema/swift-nuid.git", from: "0.2.0"),
         .package(url: "https://github.com/apple/swift-docc-plugin", from: "1.0.0"),
+        // Provides the `Crypto` module (same API as Apple's CryptoKit) on platforms that lack
+        // CryptoKit, e.g. Linux. On Apple platforms CryptoKit is used and this is not linked.
+        .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
+        // Transitive dependency (via nkeys.swift, which requires `from: 0.9.0`). Pinned to 0.9.x
+        // because swift-sodium 0.10.0+ added Aegis (and 0.11.0 IpCrypt/ML-KEM) wrappers that
+        // reference libsodium symbols absent from the stable libsodium (1.0.18) shipped by Linux
+        // distros, breaking the Linux build. 0.9.x only uses symbols present in 1.0.18 and still
+        // provides the Ed25519 signing nkeys needs. Harmless on Apple platforms (swift-sodium
+        // vendors its own recent libsodium there).
+        .package(url: "https://github.com/jedisct1/swift-sodium.git", .upToNextMinor(from: "0.9.0")),
     ],
     targets: [
         .target(
@@ -40,6 +50,10 @@ let package = Package(
             dependencies: [
                 "Nats",
                 .product(name: "Logging", package: "swift-log"),
+                // Only linked where CryptoKit is unavailable (Linux); the code imports CryptoKit on
+                // Apple platforms and `Crypto` (swift-crypto, same SHA-256 API) elsewhere.
+                .product(
+                    name: "Crypto", package: "swift-crypto", condition: .when(platforms: [.linux])),
             ]),
         .target(
             name: "Services",
@@ -61,7 +75,14 @@ let package = Package(
         ),
         .testTarget(
                 name: "JetStreamTests",
-                dependencies: ["Nats", "JetStream", "NatsServer"],
+                dependencies: [
+                    "Nats", "JetStream", "NatsServer",
+                    // ObjectStore tests hash with SHA-256; on Linux that comes from `Crypto`
+                    // (swift-crypto) since CryptoKit is Apple-only. No-op on Apple platforms.
+                    .product(
+                        name: "Crypto", package: "swift-crypto",
+                        condition: .when(platforms: [.linux])),
+                ],
                 resources: [
                 .process("Integration/Resources")
                 ]
@@ -81,7 +102,9 @@ let package = Package(
         .executableTarget(name: "PerfBench", dependencies: ["Nats", "JetStream"]),
         .executableTarget(
             name: "Scenarios", dependencies: ["Nats", "JetStream", "Services"],
-            exclude: ["README.md", "CLUSTER.md", "FAULTS.md", "cluster", "fault"]),
+            exclude: [
+                "README.md", "CLUSTER.md", "FAULTS.md", "cluster", "fault",
+            ]),
     ],
     swiftLanguageModes: [.v6]
 )
