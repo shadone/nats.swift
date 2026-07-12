@@ -665,10 +665,30 @@ extension OrderedConsumer {
             // Transient: suppress the reset storm and wait for a reconnect.
             disconnected = true
         case .connected:
+            let wasDisconnected = disconnected
             disconnected = false
+            // On a genuine RECONNECT (we had been disconnected), proactively reset rather than wait
+            // up to 2x idle-heartbeat to discover the ephemeral server consumer is gone — it usually
+            // is, since a reconnect often follows a server restart / leader change. Skip on the
+            // initial connect (never disconnected), where there is nothing to recreate yet.
+            if wasDisconnected {
+                await nudgeReconnectReset()
+            }
         default:
             break
         }
+    }
+
+    /// Kicks the pump into an immediate recreate after a reconnect: tearing down the current deliver
+    /// subscription makes the pump's blocked read return ``PushDelivery/Event/closed``, which triggers
+    /// the normal reset path (recreate the consumer from `streamSeq + 1`). No message is lost — the
+    /// restart cursor only advanced for messages already yielded, so the recreated consumer re-fetches
+    /// anything not yet yielded. Skips when closed or when a reset is already in flight.
+    private func nudgeReconnectReset() async {
+        guard !closed, !resetInProgress, let sub = currentSub else {
+            return
+        }
+        try? await sub.unsubscribe()
     }
 
     /// Terminates the consumer with `error`: finishes the `messages` stream by throwing, stops the

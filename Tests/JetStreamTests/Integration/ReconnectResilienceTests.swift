@@ -144,14 +144,23 @@ final class ReconnectResilienceTests: XCTestCase {
         natsServer.start(port: port, cfg: jsConfPath(), storeDir: storeDir)
         try await client.waitForConnected(timeout: 20)
 
-        // A put made after the reconnect must reach the resumed watch.
+        // A put made after the reconnect must reach the resumed watch PROMPTLY: the proactive
+        // reconnect reset recreates the consumer at once, rather than waiting out the missed-heartbeat
+        // timeout (~2x the 5s default = ~10s). Timing the recovery guards that speed — a regression to
+        // the slow path fails here rather than silently passing on the generous 30s budget.
         _ = try await kv.put("b", Data("2".utf8))
+        let recoveryStart = Date()
         try await ConsumeTestSupport.waitUntil(30) { seen.contains("b") }
+        let recoveryLatency = Date().timeIntervalSince(recoveryStart)
 
         reader.cancel()
         await watcher.stop()
 
         XCTAssertTrue(seen.contains("a") && seen.contains("b"), "watch must resume after reconnect")
+        XCTAssertLessThan(
+            recoveryLatency, 4.0,
+            "watch must resume promptly after reconnect (proactive reset), not after the ~10s "
+                + "missed-heartbeat timeout")
         XCTAssertGreaterThanOrEqual(
             events.disconnectedCount, 1, "the client must observe the bounce as a disconnect")
         XCTAssertGreaterThanOrEqual(
