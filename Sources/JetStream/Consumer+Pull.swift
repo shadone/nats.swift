@@ -171,7 +171,15 @@ public class FetchResult: AsyncSequence {
         func nextWithTimeout(
             _ timeout: TimeInterval, _ subIterator: NatsSubscription.AsyncIterator
         ) async throws -> NatsMessage? {
-            try await withThrowingTaskGroup(of: NatsMessage?.self) { group in
+            // Fast path: an already-buffered message is returned WITHOUT building the per-message
+            // task group (the same optimization as `PushDelivery.race()`). Under a full pull batch the
+            // reply inbox is rarely empty, so the group + its two child tasks are skipped on the hot
+            // path. The heartbeat timeout is only needed when the inbox is idle — the empty case that
+            // falls through to the group below.
+            if let ready = try subIterator.tryNext() {
+                return ready
+            }
+            return try await withThrowingTaskGroup(of: NatsMessage?.self) { group in
                 group.addTask {
                     return try await subIterator.next()
                 }
