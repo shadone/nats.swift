@@ -50,12 +50,17 @@ NATS_URL=nats://localhost:4222 swift run Scenarios <name>
 ```
 
 `<name>` is one of: `kv-watch`, `object-transfer`, `work-queue`, `service`,
-`async-publish`, `live-consume`. Running with no name (or an unknown one) prints
-the usage list.
+`async-publish`, `live-consume`, `cluster`, `slow-consumer`. Running with no name
+(or an unknown one) prints the usage list.
 
 The two long-lived scenarios (`service`, `live-consume`) run until you press
 Ctrl-C. For a bounded, scripted run set `SCEN_DURATION=<seconds>` and they exit
 cleanly after that long (used by the verification steps below).
+
+Two companion runbooks drive scenarios against harsher conditions:
+`CLUSTER.md` (R3 cluster + failover) and **`FAULTS.md`** (toxiproxy/lame-duck
+fault injection; uses `live-consume` and `slow-consumer` plus the scripts in
+`fault/`).
 
 ---
 

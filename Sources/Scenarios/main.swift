@@ -20,7 +20,7 @@ Nats.logger.logLevel = .warning
 
 let scenarioNames = [
     "kv-watch", "object-transfer", "work-queue", "service", "async-publish", "live-consume",
-    "cluster",
+    "cluster", "slow-consumer",
 ]
 
 /// Shared connection helper: reads `NATS_URL` (default `nats://localhost:4222`),
@@ -60,6 +60,7 @@ do {
     case "async-publish": try await runAsyncPublish()
     case "live-consume": try await runLiveConsume()
     case "cluster": try await runCluster()
+    case "slow-consumer": try await runSlowConsumer()
     default:
         out("main", "unknown scenario: \(scenario)")
         printUsage()
