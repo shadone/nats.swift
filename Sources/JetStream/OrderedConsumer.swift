@@ -467,8 +467,16 @@ public actor OrderedConsumer {
             if needsReset {
                 do {
                     try await recreate(maxAttempts: resetMaxAttempts)
+                } catch JetStreamError.OrderedConsumerError.closed {
+                    break  // stopped during backoff: finish the stream cleanly.
                 } catch {
-                    break  // closed during backoff or reset attempts exhausted
+                    // Reset attempts exhausted (only reachable with a finite `maxResetAttempts`):
+                    // the ordered consumer has given up recreating. Surface the failure to the
+                    // stream consumer rather than ending the sequence as if it completed
+                    // normally -- otherwise the caller silently stops receiving messages with no
+                    // way to tell delivery ended prematurely.
+                    continuation.finish(throwing: error)
+                    return
                 }
             } else {
                 break
@@ -532,7 +540,11 @@ public actor OrderedConsumer {
         )
 
         if cursor.streamSeq == 0 {
-            // First creation: use the original deliver policy.
+            // First creation, OR a reset that fired before any message was delivered
+            // (`streamSeq` still 0): re-apply the original deliver policy. For a non-sequence
+            // policy (`.new`, `.last`, `.byStartTime`) this re-anchors relative to the recreate,
+            // so messages published during the reset window can be skipped -- there is no delivered
+            // sequence to resume from yet. This matches nats.go `resetOrderedConsumer`.
             cfg.deliverPolicy = initialDeliverPolicy
             switch initialDeliverPolicy {
             case .byStartSequence:

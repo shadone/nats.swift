@@ -164,4 +164,52 @@ final class OrderedConsumeTests: XCTestCase {
 
         XCTAssertEqual(collector.sequences, Array(1...10))
     }
+
+    /// Regression: when a finite `maxResetAttempts` is exhausted, the delivery stream must FAIL
+    /// (surface the error) rather than finish cleanly. Previously the pump caught the recreate
+    /// error and finished the stream normally, so the caller silently stopped receiving messages
+    /// with no signal that delivery ended prematurely.
+    func testExhaustedResetAttemptsFailStreamNotSilently() async throws {
+        let (client, ctx) = try await setup()
+        defer { Task { try? await client.close() } }
+
+        // One reset attempt, fast heartbeat so the reset fires quickly once we break the stream.
+        let oc = OrderedConsumer(
+            ctx: ctx, streamName: "test",
+            config: OrderedConsumerConfig(maxResetAttempts: 1), idleHeartbeat: 0.2)
+        try await oc.start()
+        try await ConsumeTestSupport.publish(ctx, subject: "foo.a", count: 3)
+
+        let msgs = try oc.messages()
+        let iterate = Task { () -> Error? in
+            do {
+                for try await _ in msgs {}
+                return nil  // stream finished cleanly (the bug)
+            } catch {
+                return error  // stream failed (the fix)
+            }
+        }
+
+        // Let the first messages arrive, then destroy the whole stream: the recreate's
+        // createOrUpdateConsumer can never succeed, so the single reset attempt is exhausted.
+        try await Task.sleep(nanoseconds: 500_000_000)
+        try await ctx.deleteStream(name: "test")
+
+        // Join, bounded so a hang fails the test instead of wedging the suite.
+        let outcome: Error?? = await withTaskGroup(of: Error??.self) { group in
+            group.addTask { await iterate.value }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                return Optional<Error>.none  // timed out: treated as a non-throw (test fails)
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
+        iterate.cancel()
+
+        XCTAssertNotNil(
+            outcome ?? nil,
+            "delivery stream must FAIL on exhausted reset attempts, not finish silently")
+    }
 }
