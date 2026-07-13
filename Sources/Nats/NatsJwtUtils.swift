@@ -17,9 +17,12 @@ class JwtUtils {
     // This regular expression is equivalent to the one used in Rust.
     static let userConfigRE: NSRegularExpression = {
         do {
+            // The trailing newline after the closing delimiter is optional (`\r?\n?`) so a creds
+            // string without a final newline -- common for in-memory `credentials(_:)`, e.g. a
+            // caller that trims whitespace before passing it -- still parses.
             return try NSRegularExpression(
                 pattern:
-                    "\\s*(?:(?:-{3,}.*-{3,}\\r?\\n)([\\w\\-.=]+)(?:\\r?\\n-{3,}.*-{3,}\\r?\\n))",
+                    "\\s*(?:(?:-{3,}.*-{3,}\\r?\\n)([\\w\\-.=]+)(?:\\r?\\n-{3,}.*-{3,}\\r?\\n?))",
                 options: [])
         } catch {
             fatalError("Invalid regular expression: \(error)")

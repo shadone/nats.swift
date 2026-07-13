@@ -36,7 +36,49 @@ class ConnectionStateTests: XCTestCase {
             testWaitForConnectedTimeoutThrowsOnCancellation
         ),
         ("testConnectionStateAccessor", testConnectionStateAccessor),
+        ("testTlsFirstRejectsPlaintextServer", testTlsFirstRejectsPlaintextServer),
+        (
+            "testCredentialsAndNkeyAreMutuallyExclusive",
+            testCredentialsAndNkeyAreMutuallyExclusive
+        ),
     ]
+
+    /// Regression: `.withTlsFirst()` must NOT silently connect in plaintext. It now implies TLS is
+    /// required, so connecting to a plain (non-TLS) server fails instead of succeeding unencrypted.
+    func testTlsFirstRejectsPlaintextServer() async throws {
+        natsServer.start()
+        logger.logLevel = .critical
+        let client = NatsClientOptions()
+            .url(URL(string: natsServer.clientURL)!)
+            .withTlsFirst()
+            .build()
+        do {
+            try await client.connect()
+            try? await client.close()
+            XCTFail(".withTlsFirst() must not connect in plaintext to a non-TLS server")
+        } catch {
+            // expected: the TLS-first handshake against a plaintext server fails.
+        }
+    }
+
+    /// Regression: credentials and nkey auth are mutually exclusive -- setting both must throw a
+    /// clear config error at connect, not build an ambiguous CONNECT carrying both a JWT and an nkey.
+    func testCredentialsAndNkeyAreMutuallyExclusive() async throws {
+        natsServer.start()
+        logger.logLevel = .critical
+        let client = NatsClientOptions()
+            .url(URL(string: natsServer.clientURL)!)
+            .credentials("dummy-creds")
+            .nkey("SUACH75SWCM5D2JMJM6EKLR2WDARVGZT4QC6LX3AGHSWOMVAKERABBBRWM")
+            .build()
+        do {
+            try await client.connect()
+            try? await client.close()
+            XCTFail("connect must reject both credentials and nkey auth")
+        } catch {
+            XCTAssertTrue(error is NatsError.ConnectError, "expected a ConnectError, got \(error)")
+        }
+    }
 
     var natsServer = NatsServer()
 

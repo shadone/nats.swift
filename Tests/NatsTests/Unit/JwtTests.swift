@@ -19,8 +19,32 @@ import XCTest
 class JwtTests: XCTestCase {
 
     nonisolated(unsafe) static let allTests = [
-        ("testParseCredentialsFile", testParseCredentialsFile)
+        ("testParseCredentialsFile", testParseCredentialsFile),
+        ("testParseCredentialsWithoutTrailingNewline", testParseCredentialsWithoutTrailingNewline),
     ]
+
+    /// Regression: a decorated creds string with NO trailing newline after the final closing
+    /// delimiter must still parse. The regex previously required a trailing `\r?\n`, so an in-memory
+    /// `credentials(_:)` string -- e.g. one a caller trimmed before passing -- silently failed.
+    func testParseCredentialsWithoutTrailingNewline() {
+        // A Swift multiline literal ends at the last content line: no trailing newline.
+        let creds = """
+            -----BEGIN NATS USER JWT-----
+            eyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.abc123.def456
+            ------END NATS USER JWT------
+
+            -----BEGIN USER NKEY SEED-----
+            SUACH75SWCM5D2JMJM6EKLR2WDARVGZT4QC6LX3AGHSWOMVAKERABBBRWM
+            ------END USER NKEY SEED------
+            """
+        XCTAssertFalse(creds.hasSuffix("\n"), "fixture must end without a trailing newline")
+        XCTAssertEqual(
+            JwtUtils.parseDecoratedJWT(contents: creds),
+            "eyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.abc123.def456")
+        XCTAssertEqual(
+            JwtUtils.parseDecoratedNKey(contents: creds),
+            "SUACH75SWCM5D2JMJM6EKLR2WDARVGZT4QC6LX3AGHSWOMVAKERABBBRWM")
+    }
 
     func testParseCredentialsFile() async throws {
         logger.logLevel = .critical

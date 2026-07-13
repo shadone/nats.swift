@@ -560,6 +560,15 @@ final class ConnectionHandler: ChannelInboundHandler, Sendable {
         if self.auth?.nkey != nil && self.auth?.nkeyPath != nil {
             throw NatsError.ConnectError.invalidConfig("cannot use both nkey and nkeyPath")
         }
+        // Credentials (JWT) and nkey auth are mutually exclusive: the credentials branch sets
+        // `userJwt` + signature, and the independent nkey branches below would then overwrite the
+        // signature and add a raw nkey, producing an ambiguous CONNECT carrying both.
+        let hasCredentials =
+            self.auth?.credentialsContents != nil || self.auth?.credentialsPath != nil
+        let hasNkey = self.auth?.nkey != nil || self.auth?.nkeyPath != nil
+        if hasCredentials && hasNkey {
+            throw NatsError.ConnectError.invalidConfig("cannot use both credentials and nkey auth")
+        }
         if let auth = self.auth, let credentialsContents = auth.credentialsContents {
             // Inline credentials take precedence over a credentials file.
             // Parse the user JWT and NKey seed directly from the in-memory string,

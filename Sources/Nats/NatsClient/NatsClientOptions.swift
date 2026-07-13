@@ -145,7 +145,8 @@ public class NatsClientOptions {
         return self
     }
 
-    /// The location of a public nkey file.
+    /// The location of a file containing the nkey SEED -- the private signing key (e.g. an
+    /// `SU...` value), NOT the public identity. Keep it secret; it signs the server nonce.
     /// This and ``NatsClientOptions/nkey(_:)`` are mutually exclusive.
     public func nkeyFile(_ nkey: URL) -> NatsClientOptions {
         if self.auth == nil {
@@ -156,7 +157,8 @@ public class NatsClientOptions {
         return self
     }
 
-    /// Public nkey.
+    /// The nkey SEED -- the private signing key (e.g. an `SU...` value), NOT the public identity.
+    /// Keep it secret; it is used to sign the server nonce.
     /// This and ``NatsClientOptions/nkeyFile(_:)`` are mutually exclusive.
     public func nkey(_ nkey: String) -> NatsClientOptions {
         if self.auth == nil {
@@ -173,11 +175,15 @@ public class NatsClientOptions {
         return self
     }
 
-    /// Indicates whether the client will attempt to perform a TLS handshake first, that is
-    /// before receiving the INFO protocol. This requires the server to also be
-    /// configured with such option, otherwise the connection will fail.
+    /// Indicates whether the client will attempt to perform a TLS handshake first, that is before
+    /// receiving the INFO protocol. This implies TLS is required, so it also enables
+    /// ``requireTls()`` -- otherwise the client would silently connect in plaintext. The server must
+    /// be configured with the same option, otherwise the connection will fail.
     public func withTlsFirst() -> NatsClientOptions {
         self.tlsFirst = true
+        // TLS-first inherently means TLS is required; without this the TLS branches (both gated on
+        // `withTls`) never fire and the client connects in plaintext despite the caller asking for it.
+        self.withTls = true
         return self
     }
 
