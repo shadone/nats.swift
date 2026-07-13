@@ -294,6 +294,43 @@ final class ServicesTests: XCTestCase {
         await assertNoResponse(client, subject: "svc.echo")
     }
 
+    /// Regression: a `stop()` racing a concurrent `addEndpoint()` must not deadlock and must
+    /// leave the service fully stopped. The actor-reentrancy bug hung `stop()` forever when
+    /// an endpoint registered (resuming from its subscribe await) during teardown's
+    /// unsubscribe await. Runs the race many times, bounding each `stop()` with a task group
+    /// so a regression fails fast instead of wedging the suite.
+    func testConcurrentAddEndpointDuringStopDoesNotDeadlock() async throws {
+        let client = try await connectedClient()
+        defer { Task { try? await client.close() } }
+
+        for i in 0..<40 {
+            let service = try await client.addService(
+                ServiceConfig(name: "RaceService\(i)", version: "1.0.0"))
+            let adder = Task {
+                try? await service.addEndpoint("ep", subject: "race.\(i).ep") { request in
+                    try? await request.respond(Data("pong".utf8))
+                }
+            }
+            let stopped = await withTaskGroup(of: Bool.self) { group in
+                group.addTask {
+                    await service.stop()
+                    return true
+                }
+                group.addTask {
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    return false
+                }
+                let first = await group.next() ?? false
+                group.cancelAll()
+                return first
+            }
+            _ = await adder.value
+            XCTAssertTrue(stopped, "stop() hung under a concurrent addEndpoint (iteration \(i))")
+            let isStopped = await service.isStopped
+            XCTAssertTrue(isStopped, "service must be stopped after stop() (iteration \(i))")
+        }
+    }
+
     private func assertNoResponse(
         _ client: NatsClient, subject: String, file: StaticString = #filePath, line: UInt = #line
     ) async {

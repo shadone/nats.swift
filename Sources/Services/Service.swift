@@ -95,32 +95,40 @@ public actor Service {
     // MARK: - Lifecycle
 
     private func start() async throws {
-        for verb in Verb.allCases {
-            let subjects = [
-                ServiceSubjects.control(verb),
-                ServiceSubjects.control(verb, name: name),
-                ServiceSubjects.control(verb, name: name, id: id),
-            ]
-            for subject in subjects {
-                // Control subjects use a PLAIN subscribe (no queue group) so that
-                // every service instance answers discovery and monitoring requests.
-                let subscription = try await client.subscribe(subject: subject)
-                subscriptions.append(subscription)
-                tasks.append(
-                    Task { [weak self] in
-                        await self?.runControlLoop(subscription: subscription, verb: verb)
-                    })
+        do {
+            for verb in Verb.allCases {
+                let subjects = [
+                    ServiceSubjects.control(verb),
+                    ServiceSubjects.control(verb, name: name),
+                    ServiceSubjects.control(verb, name: name, id: id),
+                ]
+                for subject in subjects {
+                    // Control subjects use a PLAIN subscribe (no queue group) so that
+                    // every service instance answers discovery and monitoring requests.
+                    let subscription = try await client.subscribe(subject: subject)
+                    subscriptions.append(subscription)
+                    tasks.append(
+                        Task { [weak self] in
+                            await self?.runControlLoop(subscription: subscription, verb: verb)
+                        })
+                }
             }
-        }
 
-        // If the underlying connection is closed, tear down without unsubscribing
-        // (the connection is gone, so unsubscribe would throw).
-        closedListenerId = client.on(.closed) { [weak self] _ in
-            guard let self else { return }
-            Task { await self.handleConnectionClosed() }
-        }
+            // If the underlying connection is closed, tear down without unsubscribing
+            // (the connection is gone, so unsubscribe would throw).
+            closedListenerId = client.on(.closed) { [weak self] _ in
+                guard let self else { return }
+                Task { await self.handleConnectionClosed() }
+            }
 
-        started = Date()
+            started = Date()
+        } catch {
+            // A subscribe failed partway through startup. Tear down whatever was
+            // established so no subscription/task is orphaned -- `create()` throws and
+            // never returns a handle the caller could `stop()`.
+            await teardown(unsubscribe: true)
+            throw error
+        }
     }
 
     /// Registers an endpoint with the given resolved subject and queue group.
@@ -139,6 +147,14 @@ public actor Service {
         }
         // Endpoint subjects use the queue group so requests load-balance across instances.
         let subscription = try await client.subscribe(subject: subject, queue: queueGroup)
+        // Re-check after the await: `teardown()` may have run to completion during the
+        // subscribe suspension (actors are reentrant). Registering into an
+        // already-stopped service would leak a live subscription and a task that nothing
+        // cancels -- and could wedge a concurrent `stop()`. Undo and report stopped.
+        guard !stopped else {
+            try? await subscription.unsubscribe()
+            throw ServiceError.stopped
+        }
         let index = endpoints.count
         endpoints.append(
             EndpointRegistration(
@@ -207,19 +223,27 @@ public actor Service {
             client.off(closedListenerId)
             self.closedListenerId = nil
         }
-        for task in tasks {
+        // Snapshot and clear the arrays up front so this teardown operates on a fixed set,
+        // immune to a concurrent `registerEndpoint` that resumes from its subscribe await
+        // during the `unsubscribe` suspension below. (That call also re-checks `stopped`
+        // and unsubscribes itself; even if it appended, its task is not in this snapshot,
+        // so the wait loop cannot block on a subscription this teardown never cancelled.)
+        let tasksToStop = tasks
+        let subscriptionsToStop = subscriptions
+        tasks.removeAll()
+        subscriptions.removeAll()
+
+        for task in tasksToStop {
             task.cancel()
         }
         if unsubscribe {
-            for subscription in subscriptions {
+            for subscription in subscriptionsToStop {
                 try? await subscription.unsubscribe()
             }
         }
-        for task in tasks {
+        for task in tasksToStop {
             _ = await task.value
         }
-        tasks.removeAll()
-        subscriptions.removeAll()
     }
 
     // MARK: - Monitoring
