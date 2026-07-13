@@ -76,7 +76,9 @@ public struct NatsHeaderMap: Equatable, Sendable {
     public init(from headersString: String) throws {
         self.inner = [:]
         let headersArray = headersString.split(separator: "\r\n")
-        let versionLine = headersArray[0]
+        guard let versionLine = headersArray.first else {
+            throw NatsError.ProtocolError.parserFailure("empty header block")
+        }
         guard versionLine.hasPrefix(Data.versionLinePrefix) else {
             throw NatsError.ProtocolError.parserFailure(
                 "header version line does not begin with `NATS/1.0`")

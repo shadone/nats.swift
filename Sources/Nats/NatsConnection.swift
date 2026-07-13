@@ -418,9 +418,18 @@ final class ConnectionHandler: ChannelInboundHandler, Sendable {
             }
         }
         self.reconnectAttempts = 0
+        // Reset the ping bookkeeping on every (re)connect. `outstandingPings` is only cleared by a
+        // PONG, so a stale non-zero count carried over from the previous connection's missed pings
+        // would trip the ">2" disconnect on the very first ping of the new, healthy connection --
+        // flapping connected/disconnected forever.
+        self.outstandingPings.store(0, ordering: AtomicStoreOrdering.relaxed)
         guard let channel = self.channel else {
             throw NatsError.ClientError.internalError("empty channel")
         }
+        // Cancel any ping task from a previous connection before scheduling a new one; otherwise a
+        // reconnect leaks the old `RepeatedTask`, which keeps firing against the dead channel and
+        // duplicates ping/disconnect triggers.
+        self.pingTask?.cancel()
         // Schedule the task to send a PING periodically
         let pingInterval = TimeAmount.nanoseconds(Int64(self.pingInterval * 1_000_000_000))
         self.pingTask = channel.eventLoop.scheduleRepeatedTask(
@@ -812,10 +821,18 @@ final class ConnectionHandler: ChannelInboundHandler, Sendable {
     func close() async throws {
         self.reconnectTask?.cancel()
         try await self.reconnectTask?.value
+        await performClose()
+    }
 
+    /// Tears the connection down: `.closed` state, cancels the ping task, closes the channel, drops
+    /// the outgoing buffer, and fires `.closed`. Unlike ``close()`` it does NOT cancel/await
+    /// `reconnectTask`, so it is safe to call from WITHIN that task (the exhausted-retries path,
+    /// where `close()` would await this very task's own value and deadlock forever).
+    private func performClose() async {
         guard let eventLoop = self.channel?.eventLoop else {
             self.state.withLockedValue { $0 = .closed }
             self.pingTask?.cancel()
+            self.batchBuffer = nil
             self.fire(.closed)
             return
         }
@@ -832,8 +849,11 @@ final class ConnectionHandler: ChannelInboundHandler, Sendable {
         } catch ChannelError.alreadyClosed {
             // we don't want to throw an error if channel is already closed
             // as that would mean we would get an error closing client during reconnect
+        } catch {
+            logger.debug("error closing channel: \(error)")
         }
 
+        self.batchBuffer = nil
         self.fire(.closed)
     }
 
@@ -977,6 +997,10 @@ final class ConnectionHandler: ChannelInboundHandler, Sendable {
 
     func handleDisconnect() {
         state.withLockedValue { $0 = .disconnected }
+        // Invalidate the outgoing buffer bound to the now-dead channel, so a write during the
+        // reconnect gap fails cleanly ("not connected") instead of silently succeeding into a buffer
+        // that will never flush. connect() installs a fresh buffer on the new channel.
+        self.batchBuffer = nil
         if let channel = self.channel {
             let promise = channel.eventLoop.makePromise(of: Void.self)
             Task {
@@ -1004,69 +1028,88 @@ final class ConnectionHandler: ChannelInboundHandler, Sendable {
     }
 
     func handleReconnect() {
+        // Atomically check-and-set: start the reconnect task only if one isn't already active. Doing
+        // the check and the assignment in ONE locked section closes the TOCTOU window where two
+        // triggers (the ping-timeout `Task` and `channelInactive` on the event loop) could both
+        // observe `nil` and start two concurrent reconnect loops.
+        let started: Bool = _reconnectTask.withLockedValue { task in
+            if let existing = task, !existing.isCancelled {
+                return false
+            }
+            task = Task { try await self.runReconnectLoop() }
+            return true
+        }
+        if !started {
+            logger.debug("Reconnect already in progress. Ignoring duplicate trigger.")
+        }
+    }
 
-        let isAlreadyReconnecting = _reconnectTask.withLockedValue { task -> Bool in
-            guard let activeTask = task else { return false }
-            return !activeTask.isCancelled
+    private func runReconnectLoop() async throws {
+        defer {
+            _reconnectTask.withLockedValue { $0 = nil }
         }
 
-        guard !isAlreadyReconnecting else {
-            logger.debug("Reconnect already in progress. Ignoring duplicate trigger.")
+        var connected = false
+        while !Task.isCancelled
+            && (maxReconnects == nil || self.reconnectAttempts < maxReconnects!)
+        {
+            do {
+                try await self.connect()
+                connected = true
+                break  // Successfully connected
+            } catch is CancellationError {
+                logger.debug("Reconnect task cancelled")
+                return
+            } catch {
+                logger.debug("Could not reconnect: \(error)")
+                // Surface each failed attempt so an app can observe a permanently-failing connect
+                // (e.g. bad/revoked credentials) instead of it only appearing in debug logs -- under
+                // retryOnfailedConnect, connect() returns before the first success, so this event is
+                // the only signal the app gets.
+                if let natsErr = error as? NatsErrorProtocol {
+                    self.fire(.error(natsErr))
+                }
+                if !Task.isCancelled {
+                    try await Task.sleep(nanoseconds: self.reconnectWait)
+                }
+            }
+        }
+
+        // Early return if cancelled
+        if Task.isCancelled {
+            logger.debug("Reconnect task cancelled after connection attempts")
             return
         }
 
-        reconnectTask = Task {
+        // If we got here without connecting and weren't cancelled, we hit max reconnects. Tear down
+        // INLINE via performClose(): calling close() here would cancel and await THIS task's own
+        // value, deadlocking it forever (and .closed would never fire).
+        if !connected {
+            logger.error("Could not reconnect; maxReconnects exceeded")
+            await performClose()
+            return
+        }
 
-            defer {
-                _reconnectTask.withLockedValue { $0 = nil }
-            }
-
-            var connected = false
-            while !Task.isCancelled
-                && (maxReconnects == nil || self.reconnectAttempts < maxReconnects!)
-            {
-                do {
-                    try await self.connect()
-                    connected = true
-                    break  // Successfully connected
-                } catch is CancellationError {
-                    logger.debug("Reconnect task cancelled")
-                    return
-                } catch {
-                    logger.debug("Could not reconnect: \(error)")
-                    if !Task.isCancelled {
-                        try await Task.sleep(nanoseconds: self.reconnectWait)
-                    }
+        // Recreate subscriptions - safely copy first. Preserve the queue group (a plain resubscribe
+        // silently turns a queue subscriber into a fan-out plain subscriber) and restore any
+        // server-side auto-unsub limit (else the server keeps delivering to a finished subscription).
+        let subsToRestore = subscriptions.withLockedValue { Array($0) }
+        for (sid, sub) in subsToRestore {
+            do {
+                try await write(operation: ClientOp.subscribe((sid, sub.subject, sub.queue)))
+                if let max = sub.max {
+                    let delivered = sub.delivered
+                    let remaining = max > delivered ? max - delivered : 0
+                    try await write(operation: ClientOp.unsubscribe((sid, remaining)))
                 }
+            } catch {
+                logger.error("Error recreating subscription \(sid): \(error)")
             }
+        }
 
-            // Early return if cancelled
-            if Task.isCancelled {
-                logger.debug("Reconnect task cancelled after connection attempts")
-                return
-            }
-
-            // If we got here without connecting and weren't cancelled, we hit max reconnects
-            if !connected {
-                logger.error("Could not reconnect; maxReconnects exceeded")
-                try await self.close()
-                return
-            }
-
-            // Recreate subscriptions - safely copy first
-            let subsToRestore = subscriptions.withLockedValue { Array($0) }
-            for (sid, sub) in subsToRestore {
-                do {
-                    try await write(operation: ClientOp.subscribe((sid, sub.subject, nil)))
-                } catch {
-                    logger.error("Error recreating subscription \(sid): \(error)")
-                }
-            }
-
-            self.channel?.eventLoop.execute {
-                self.state.withLockedValue { $0 = .connected }
-                self.fire(.connected)
-            }
+        self.channel?.eventLoop.execute {
+            self.state.withLockedValue { $0 = .connected }
+            self.fire(.connected)
         }
     }
 
@@ -1176,7 +1219,7 @@ public enum NatsEventKind: String, Sendable {
     case suspended = "suspended"
     case lameDuckMode = "lameDuckMode"
     case error = "error"
-    static let all = [connected, disconnected, closed, lameDuckMode, error]
+    static let all = [connected, disconnected, closed, suspended, lameDuckMode, error]
 }
 
 public enum NatsEvent: Sendable {

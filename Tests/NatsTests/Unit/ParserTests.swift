@@ -18,8 +18,25 @@ import XCTest
 class ParserTests: XCTestCase {
 
     nonisolated(unsafe) static let allTests = [
-        ("testParseOutMessages", testParseOutMessages)
+        ("testParseOutMessages", testParseOutMessages),
+        ("testMalformedHMsgLengthsThrowNotCrash", testMalformedHMsgLengthsThrowNotCrash),
     ]
+
+    /// Regression: a malformed HMSG header/total length must throw a protocol error, not crash the
+    /// process. `hdr_len > total_len` used to form an out-of-range slice, and `hdr_len == 0` an empty
+    /// header block that trapped on `headersArray[0]` -- a one-frame DoS on a non-TLS connection.
+    func testMalformedHMsgLengthsThrowNotCrash() {
+        // hdr_len (30) > total_len (20).
+        let bigHdr = Data("HMSG foo 1 30 20\r\n01234567890123456789\r\n".utf8)
+        XCTAssertThrowsError(try bigHdr.parseOutMessages()) { error in
+            XCTAssertTrue(error is NatsError.ProtocolError, "expected ProtocolError, got \(error)")
+        }
+        // hdr_len == 0.
+        let zeroHdr = Data("HMSG foo 1 0 5\r\nhello\r\n".utf8)
+        XCTAssertThrowsError(try zeroHdr.parseOutMessages()) { error in
+            XCTAssertTrue(error is NatsError.ProtocolError, "expected ProtocolError, got \(error)")
+        }
+    }
 
     override func setUp() {
         super.setUp()

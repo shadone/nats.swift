@@ -132,6 +132,16 @@ extension Data {
                 if msg.length == 0 {
                     serverOps.append(serverOp)
                 } else {
+                    // Validate the wire-provided header length before deriving any slice bounds:
+                    // hdr_len must be within (0, total_len]. A malformed hdr_len (0, or greater than
+                    // total_len) would otherwise form an out-of-range slice, or an empty header block
+                    // the header parser traps on -- turning a protocol anomaly (a misbehaving proxy or
+                    // an attacker on a non-TLS link) into a process crash.
+                    guard msg.headersLength > 0, msg.headersLength <= msg.length else {
+                        throw NatsError.ProtocolError.parserFailure(
+                            "invalid HMSG lengths: hdr_len=\(msg.headersLength) "
+                                + "total_len=\(msg.length)")
+                    }
                     let headersStartIndex = nextLineStartIndex
                     let headersEndIndex = nextLineStartIndex + msg.headersLength
                     let payloadStartIndex = headersEndIndex
