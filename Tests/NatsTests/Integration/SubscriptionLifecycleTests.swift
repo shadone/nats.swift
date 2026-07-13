@@ -27,6 +27,7 @@ final class SubscriptionLifecycleTests: XCTestCase {
             "testUnsubscribeAfterCancelDoesNotDropMessage",
             testUnsubscribeAfterCancelDoesNotDropMessage
         ),
+        ("testAlreadyCancelledReaderDoesNotHang", testAlreadyCancelledReaderDoesNotHang),
     ]
 
     var natsServer = NatsServer()
@@ -156,6 +157,31 @@ final class SubscriptionLifecycleTests: XCTestCase {
         XCTAssertEqual(
             received, ["m0", "m1", "m2"],
             "a cancelled wait dropped a message via delivered miscount")
+    }
+
+    /// Regression: a reader that calls next() when its task is ALREADY cancelled must return, not
+    /// hang. `withTaskCancellationHandler` fires onCancel synchronously before the operation runs in
+    /// that case, so it finds no parked waiter -- the operation must itself observe the cancellation
+    /// rather than parking a waiter nothing will ever wake.
+    func testAlreadyCancelledReaderDoesNotHang() async throws {
+        let client = try await connect()
+        defer { Task { try? await client.close() } }
+        let sub = try await client.subscribe(subject: "foo")
+
+        let reader = Task { () -> Bool in
+            // Only start reading once cancelled, forcing the cancelled-before-entry path.
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 5_000_000)
+            }
+            var it = sub.makeAsyncIterator()
+            let msg = try? await it.next()
+            return msg == nil
+        }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        reader.cancel()
+
+        let returned = await completesWithin(5) { _ = await reader.value }
+        XCTAssertTrue(returned, "an already-cancelled reader hung in next() instead of returning")
     }
 }
 

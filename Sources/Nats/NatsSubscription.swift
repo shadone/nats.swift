@@ -179,6 +179,11 @@ public final class NatsSubscription: AsyncSequence, Sendable {
         }
 
         let action: PostLockAction = state.withLockedValue { state in
+            if state.closed {
+                // Closed: no reader will ever drain the buffer (nextMessage/tryNextMessage return nil
+                // on `closed` before consulting it), so drop rather than grow it unreachably.
+                return .none
+            }
             if !state.waiters.isEmpty {
                 // Hand the message directly to the longest-waiting reader (FIFO); only buffer when
                 // no reader is parked.
@@ -212,6 +217,10 @@ public final class NatsSubscription: AsyncSequence, Sendable {
     func receiveError(_ error: NatsError.SubscriptionError) {
         let continuationToResume: ReaderContinuation? =
             state.withLockedValue { state in
+                if state.closed {
+                    // Closed: nothing will drain a buffered failure; drop it.
+                    return nil
+                }
                 if !state.waiters.isEmpty {
                     return state.waiters.removeFirst().cont
                 } else {
@@ -274,7 +283,11 @@ public final class NatsSubscription: AsyncSequence, Sendable {
                     }
 
                     let action: Action = state.withLockedValue { state in
-                        if state.closed {
+                        // Also bail on an ALREADY-cancelled task: `withTaskCancellationHandler` fires
+                        // `onCancel` synchronously BEFORE this operation runs when the task is cancelled
+                        // on entry, so `onCancel` finds no parked waiter to remove -- without this check
+                        // we would then park a waiter that nothing ever wakes (a hang).
+                        if state.closed || Task.isCancelled {
                             return .resume(nil)
                         }
 
