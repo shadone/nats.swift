@@ -21,8 +21,16 @@ import Foundation
 /// permanently, so calling ``wait()`` more than once always yields the same result.
 public struct PubAckFuture: Sendable {
     private let box: PubAckBox
+    /// Retains the owning ``JetStreamContext`` for as long as the caller holds this future, so the
+    /// context -- and thus the shared ack subscription/pump this publish is waiting on -- cannot be
+    /// deallocated (firing `deinit`'s `shutdown()`, which would spuriously fail this still-in-flight
+    /// publish) while its ack is still outstanding.
+    private let keepAlive: JetStreamContext?
 
-    init(box: PubAckBox) { self.box = box }
+    init(box: PubAckBox, keepAlive: JetStreamContext? = nil) {
+        self.box = box
+        self.keepAlive = keepAlive
+    }
 
     /// Awaits the server ack, or the failure the server/transport reported (a CAS/wrong-last-sequence
     /// error, ``JetStreamError/PublishError/streamNotFound``, a send failure, or a per-message

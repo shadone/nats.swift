@@ -87,7 +87,16 @@ final class JetStreamPublishAsync: @unchecked Sendable {
         let reply: String
     }
 
-    private typealias StallContinuation = CheckedContinuation<Reservation?, Never>
+    /// The outcome handed to a parked (backpressure-stalled) publisher when it is resumed: a slot
+    /// freed (retry the reservation), or the publisher shut down (fail rather than admit a new box
+    /// that nothing would resolve — the reaper and pump are gone once shut down).
+    private enum ReserveOutcome {
+        case reserved(Reservation)
+        case retry
+        case shutdown
+    }
+
+    private typealias StallContinuation = CheckedContinuation<ReserveOutcome, Never>
     private typealias CompleteContinuation = CheckedContinuation<Void, Never>
 
     init(client: NatsClient, timeout: TimeInterval, maxPending: Int = 4000) {
@@ -180,7 +189,7 @@ final class JetStreamPublishAsync: @unchecked Sendable {
     /// publish fails / times out). Stalls when `maxPending` acks are already in flight.
     func publishAsync(
         _ subject: String, message: Data, headers: NatsHeaderMap? = nil,
-        msgTTL: NanoTimeInterval? = nil
+        msgTTL: NanoTimeInterval? = nil, keepAlive: JetStreamContext? = nil
     ) async throws -> PubAckFuture {
         try await ensureStarted()
         guard let prefix = lock.withLockScoped({ inboxPrefix }) else {
@@ -197,7 +206,8 @@ final class JetStreamPublishAsync: @unchecked Sendable {
 
         // Backpressure: reserve a window slot (allocating token + box + deadline atomically with the
         // window check), parking while the window is full. Never lets more than `maxPending` through.
-        let reservation = await reserveSlot(prefix: prefix)
+        // Throws if the publisher was shut down (rather than returning a doomed reservation).
+        let reservation = try await reserveSlot(prefix: prefix)
 
         do {
             try await client.publish(
@@ -208,7 +218,7 @@ final class JetStreamPublishAsync: @unchecked Sendable {
             throw error
         }
 
-        return PubAckFuture(box: reservation.box)
+        return PubAckFuture(box: reservation.box, keepAlive: keepAlive)
     }
 
     /// Reserves a window slot, parking the caller while the window is full.
@@ -218,40 +228,55 @@ final class JetStreamPublishAsync: @unchecked Sendable {
     /// slot freeing between "check" and "park" cannot be lost. A parked caller is later resumed with
     /// `nil` (by `finish`/`failEverything`) and loops to re-reserve; admission is re-gated by the lock
     /// on every attempt, so the window never overshoots `maxPending`.
-    private func reserveSlot(prefix: String) async -> Reservation {
-        // Fast path: reserve immediately with NO continuation/suspension when the window has room.
-        if let immediate = lock.withLockScoped({ tryReserveLocked(prefix: prefix) }) {
-            return immediate
+    private func reserveSlot(prefix: String) async throws -> Reservation {
+        // Fast path: reserve immediately with NO continuation/suspension when the window has room. A
+        // shut-down publisher fails here rather than admitting a box the (cancelled) reaper and pump
+        // would never resolve.
+        let fast: ReserveOutcome = lock.withLockScoped {
+            if isShutdown { return .shutdown }
+            if let reservation = tryReserveLocked(prefix: prefix) { return .reserved(reservation) }
+            return .retry
         }
-        // Slow path: window full — park, and retry each time a slot is handed to us.
+        switch fast {
+        case .shutdown: throw NatsError.ClientError.connectionClosed
+        case .reserved(let reservation): return reservation
+        case .retry: break
+        }
+        // Slow path: window full — park, and retry each time a slot is handed to us. If `shutdown()`
+        // wakes us instead (via `failEverything`), fail rather than re-park (which would hang) or
+        // reserve a doomed slot.
         while true {
-            let reserved: Reservation? = await withCheckedContinuation {
+            let outcome: ReserveOutcome = await withCheckedContinuation {
                 (cont: StallContinuation) in
-                let immediate: Reservation? = lock.withLockScoped {
+                let immediate: ReserveOutcome? = lock.withLockScoped {
+                    if isShutdown { return .shutdown }
                     if let reservation = tryReserveLocked(prefix: prefix) {
-                        return reservation
+                        return .reserved(reservation)
                     }
-                    // Window full: park this caller. `finish` resumes it with `nil` to retry.
+                    // Window full: park this caller. `finish` resumes it with `.retry`;
+                    // `failEverything` (close/shutdown) with `.shutdown`.
                     stallWaiters.append(cont)
                     return nil
                 }
                 if let immediate {
                     cont.resume(returning: immediate)
                 }
-                // else parked; resumed later with `nil` → the loop retries.
+                // else parked; resumed later → the loop acts on the outcome.
             }
-            if let reserved {
-                return reserved
+            switch outcome {
+            case .reserved(let reservation): return reservation
+            case .shutdown: throw NatsError.ClientError.connectionClosed
+            case .retry: continue
             }
         }
     }
 
     /// MUST hold `lock`. Allocates a token + box + deadline and returns the reservation when the window
-    /// has room OR the publisher is shutting down (so a woken publisher always makes progress to a
-    /// publish that then fails on the dead connection, rather than parking forever). Returns `nil` when
-    /// the window is full and the caller should park.
+    /// has room. Returns `nil` when the window is full (the caller parks) or the publisher is shutting
+    /// down (the caller fails via ``reserveSlot(prefix:)``'s shutdown check — a box admitted after
+    /// shutdown would never be resolved, the reaper and pump being gone).
     private func tryReserveLocked(prefix: String) -> Reservation? {
-        guard isShutdown || acks.count < maxPending else { return nil }
+        guard !isShutdown, acks.count < maxPending else { return nil }
         counter += 1
         let token = String(counter)
         let box = PubAckBox()
@@ -303,7 +328,7 @@ final class JetStreamPublishAsync: @unchecked Sendable {
         }
         guard let (box, stall, completers) = work else { return }
         box.resolve(result)
-        stall?.resume(returning: nil)
+        stall?.resume(returning: .retry)
         for completer in completers {
             completer.resume()
         }
@@ -327,11 +352,11 @@ final class JetStreamPublishAsync: @unchecked Sendable {
         for box in work.0 {
             box.resolve(.failure(error))
         }
-        // Wake every backpressure-parked publisher: the window is now empty, so each re-reserves and
-        // proceeds (its own publish then fails on the dead connection). Without this, a publisher
-        // parked when the connection closed would hang forever.
+        // Wake every backpressure-parked publisher with `.shutdown` so each fails fast (its publish
+        // could otherwise succeed on a still-live connection but its box would never be resolved once
+        // the pump/reaper are gone). Without this wake, a publisher parked at close would hang forever.
         for cont in work.1 {
-            cont.resume(returning: nil)
+            cont.resume(returning: .shutdown)
         }
         for cont in work.2 {
             cont.resume()
@@ -458,8 +483,11 @@ extension JetStreamContext {
         _ subject: String, message: Data, headers: NatsHeaderMap? = nil,
         msgTTL: NanoTimeInterval? = nil
     ) async throws -> PubAckFuture {
+        // `keepAlive: self` makes the returned future retain this context, so it cannot be
+        // deallocated (firing `deinit`'s `shutdown()`) while the caller still holds an outstanding
+        // publish future -- which would otherwise spuriously fail an already-committed publish.
         try await asyncPublisher.publishAsync(
-            subject, message: message, headers: headers, msgTTL: msgTTL)
+            subject, message: message, headers: headers, msgTTL: msgTTL, keepAlive: self)
     }
 
     /// Number of async publishes currently in flight (published but not yet acked/failed/timed out).

@@ -11,6 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import NIOConcurrencyHelpers
 import Nats
 import NatsServer
 import XCTest
@@ -222,6 +223,88 @@ final class PublishAsyncTests: XCTestCase {
             // expected
         }
         _ = future  // still unresolved; cleaned up on shutdown/close
+    }
+
+    /// Regression: a publish through a `JetStreamContext` that is NOT retained past the
+    /// `publishAsync` call must still resolve to a successful ack. Before the fix, ARC could
+    /// deallocate the context the instant `publishAsync` returned, firing `deinit`'s `shutdown()`,
+    /// which failed the in-flight box with `connectionClosed` even though the message committed. The
+    /// returned future now retains the context, so this cannot happen.
+    func testPublishAsyncFutureSurvivesEphemeralContextRelease() async throws {
+        let (client, setup) = try await connectedContext()
+        defer { Task { try? await client.close() } }
+        _ = try await setup.createStream(
+            cfg: StreamConfig(name: "ASYNC_LT", subjects: ["async.lt.>"]))
+
+        // Publish through a context that goes out of scope on return: only the future is kept.
+        func publishThroughEphemeralContext(_ i: Int) async throws -> PubAckFuture {
+            let ephemeral = JetStreamContext(client: client)
+            return try await ephemeral.publishAsync("async.lt.m", message: Data("m-\(i)".utf8))
+        }
+
+        var futures: [PubAckFuture] = []
+        for i in 0..<20 {
+            futures.append(try await publishThroughEphemeralContext(i))
+        }
+        // Every future must resolve to a real ack -- no spurious connectionClosed failures.
+        for future in futures {
+            let ack = try await future.wait()
+            XCTAssertGreaterThan(ack.seq, 0)
+        }
+    }
+
+    /// Regression: shutting the publisher down while a backpressure-parked publisher is waiting must
+    /// FAIL that publisher, not hand it a fresh window slot whose box nothing would ever resolve (the
+    /// pump and reaper are gone once shut down) -- which would hang `wait()` forever.
+    func testShutdownWhileStalledFailsParkedPublisher() async throws {
+        let (client, _) = try await connectedContext()
+        defer { Task { try? await client.close() } }
+
+        // Window of 1. Fill it with one in-flight publish whose ack never arrives: a plain subscriber
+        // gives the subject a responder (suppressing the 503) but sends no ack, so the box stays
+        // pending and the window stays full. A long timeout keeps the reaper from draining it.
+        let pub = JetStreamPublishAsync(client: client, timeout: 30, maxPending: 1)
+        let sink = try await client.subscribe(subject: "async.sd.stuck")
+        defer { Task { try? await sink.unsubscribe() } }
+        let first = try await pub.publishAsync("async.sd.stuck", message: Data("1".utf8))
+
+        // A second publish parks (window full). Record its result out-of-band.
+        let thrown = NIOLockedValueBox<Error?>(nil)
+        let succeeded = NIOLockedValueBox(false)
+        let parked = Task {
+            do {
+                _ = try await pub.publishAsync("async.sd.stuck", message: Data("2".utf8))
+                succeeded.withLockedValue { $0 = true }
+            } catch {
+                thrown.withLockedValue { $0 = error }
+            }
+        }
+        try await Task.sleep(nanoseconds: 300_000_000)  // let it park
+
+        // Shut down while the connection is still alive -- the CAS for the orphan bug.
+        await pub.shutdown()
+
+        // The parked publisher must return promptly (bounded so a regression fails fast, not hangs).
+        let returned = await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                await parked.value
+                return true
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                return false
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
+        XCTAssertTrue(returned, "parked publishAsync hung on shutdown (orphaned future)")
+        XCTAssertFalse(
+            succeeded.withLockedValue { $0 },
+            "parked publishAsync must fail on shutdown, not succeed with an unresolvable box")
+        XCTAssertNotNil(
+            thrown.withLockedValue { $0 }, "parked publishAsync should throw on shutdown")
+        _ = first  // held so its box isn't the reason the window frees
     }
 
     /// Runs `body` against a timeout; returns true if it finished, false if it hung past `seconds`.
