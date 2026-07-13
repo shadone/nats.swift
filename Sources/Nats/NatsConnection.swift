@@ -837,11 +837,26 @@ final class ConnectionHandler: ChannelInboundHandler, Sendable {
     /// the outgoing buffer, and fires `.closed`. Unlike ``close()`` it does NOT cancel/await
     /// `reconnectTask`, so it is safe to call from WITHIN that task (the exhausted-retries path,
     /// where `close()` would await this very task's own value and deadlock forever).
+    /// On a permanent close, end every open subscription so a reader suspended in `nextMessage()`
+    /// is resumed with `nil` (end-of-stream) rather than hanging forever. Snapshot + clear under the
+    /// lock, then `complete()` each OUTSIDE the lock (it resumes reader continuations).
+    private func completeAllSubscriptions() {
+        let subs = self.subscriptions.withLockedValue { subs -> [NatsSubscription] in
+            let all = Array(subs.values)
+            subs.removeAll()
+            return all
+        }
+        for sub in subs {
+            sub.complete()
+        }
+    }
+
     private func performClose() async {
         guard let eventLoop = self.channel?.eventLoop else {
             self.state.withLockedValue { $0 = .closed }
             self.pingTask?.cancel()
             self.batchBuffer = nil
+            self.completeAllSubscriptions()
             self.fire(.closed)
             return
         }
@@ -863,6 +878,7 @@ final class ConnectionHandler: ChannelInboundHandler, Sendable {
         }
 
         self.batchBuffer = nil
+        self.completeAllSubscriptions()
         self.fire(.closed)
     }
 

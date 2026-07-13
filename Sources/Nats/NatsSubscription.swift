@@ -11,6 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import Atomics
 import Foundation
 import NIOConcurrencyHelpers
 import NIOCore
@@ -40,12 +41,18 @@ public final class NatsSubscription: AsyncSequence, Sendable {
     }
     internal let sid: UInt64
 
+    private typealias ReaderContinuation =
+        CheckedContinuation<Result<NatsMessage, NatsError.SubscriptionError>?, Never>
+
     private struct State: Sendable {
         var buffer = FIFOBuffer<Result<NatsMessage, NatsError.SubscriptionError>>()
         var closed = false
         var delivered: UInt64 = 0
-        var continuation:
-            CheckedContinuation<Result<NatsMessage, NatsError.SubscriptionError>?, Never>? = nil
+        // FIFO queue of parked readers. A single Optional would let a second concurrent
+        // `nextMessage()` overwrite (and permanently orphan) the first's continuation; the queue
+        // parks each reader safely and resumes them in arrival order. Each waiter carries a unique
+        // id so a per-call cancellation handler removes exactly its own entry, never another's.
+        var waiters: [(id: UInt64, cont: ReaderContinuation)] = []
         // Edge flag: set on the first overflow drop of a slow episode so the slow-consumer
         // event fires exactly once per episode; cleared once the backlog drains below the
         // low-water mark (see `slowConsumerLowWaterMark`).
@@ -55,6 +62,9 @@ public final class NatsSubscription: AsyncSequence, Sendable {
     private let state = NIOLockedValueBox(State())
     private let capacity: UInt64
     private let conn: ConnectionHandler
+
+    /// Monotonic source of per-reader waiter ids (see `State.waiters`).
+    private let waiterIDCounter = ManagedAtomic<UInt64>(0)
 
     /// Backlog level at which the per-episode slow-consumer edge flag is cleared, so a later
     /// episode surfaces a fresh event. Half of `capacity` avoids flapping around the boundary.
@@ -163,17 +173,17 @@ public final class NatsSubscription: AsyncSequence, Sendable {
         // Decide everything under the lock, then act (resume) OUTSIDE it: never call a continuation
         // while holding `state.withLockedValue`.
         enum PostLockAction {
-            case resume(
-                CheckedContinuation<Result<NatsMessage, NatsError.SubscriptionError>?, Never>)
+            case resume(ReaderContinuation)
             case fireSlowConsumer
             case none
         }
 
         let action: PostLockAction = state.withLockedValue { state in
-            if let continuation = state.continuation {
-                // Only append to buffer if no continuation is available
-                state.continuation = nil
-                return .resume(continuation)
+            if !state.waiters.isEmpty {
+                // Hand the message directly to the longest-waiting reader (FIFO); only buffer when
+                // no reader is parked.
+                let cont = state.waiters.removeFirst().cont
+                return .resume(cont)
             } else if state.buffer.count < capacity {
                 state.buffer.append(.success(message))
                 return .none
@@ -200,32 +210,33 @@ public final class NatsSubscription: AsyncSequence, Sendable {
     }
 
     func receiveError(_ error: NatsError.SubscriptionError) {
-        let continuationToResume:
-            CheckedContinuation<Result<NatsMessage, NatsError.SubscriptionError>?, Never>? =
-                state.withLockedValue { state in
-                    if let continuation = state.continuation {
-                        state.continuation = nil
-                        return continuation
-                    } else {
-                        state.buffer.append(.failure(error))
-                        return nil
-                    }
+        let continuationToResume: ReaderContinuation? =
+            state.withLockedValue { state in
+                if !state.waiters.isEmpty {
+                    return state.waiters.removeFirst().cont
+                } else {
+                    state.buffer.append(.failure(error))
+                    return nil
                 }
+            }
 
         continuationToResume?.resume(returning: .failure(error))
     }
 
     internal func complete() {
-        let continuationToResume:
-            CheckedContinuation<Result<NatsMessage, NatsError.SubscriptionError>?, Never>? =
-                state.withLockedValue { state in
-                    state.closed = true
-                    let cont = state.continuation
-                    state.continuation = nil
-                    return cont
-                }
+        // Close and wake EVERY parked reader with `nil` (end-of-stream); leaving any waiter parked
+        // would hang it forever (the bug that a plain `client.close()` used to hit).
+        let waitersToResume: [ReaderContinuation] =
+            state.withLockedValue { state in
+                state.closed = true
+                let conts = state.waiters.map { $0.cont }
+                state.waiters.removeAll()
+                return conts
+            }
 
-        continuationToResume?.resume(returning: nil)
+        for cont in waitersToResume {
+            cont.resume(returning: nil)
+        }
     }
 
     // AsyncIterator implementation
@@ -248,6 +259,10 @@ public final class NatsSubscription: AsyncSequence, Sendable {
     }
 
     private func nextMessage() async throws -> Element? {
+        // A unique id for THIS call's parked waiter, so the cancellation handler removes exactly its
+        // own entry from the FIFO queue (never another concurrent reader's).
+        let waiterID = waiterIDCounter.wrappingIncrementThenLoad(ordering: .relaxed)
+
         // Use withTaskCancellationHandler to prevent continuation leaks and hangs
         // if the parent Task is cancelled while awaiting a message.
         let result: Result<Element, NatsError.SubscriptionError>? =
@@ -263,10 +278,6 @@ public final class NatsSubscription: AsyncSequence, Sendable {
                             return .resume(nil)
                         }
 
-                        // delivered tracks "slots consumed", not "messages returned".
-                        // It is incremented here — before the message is in hand.
-                        state.delivered += 1
-
                         if let message = state.buffer.popFirst() {
                             // Reset the slow-consumer edge flag once the backlog drains below the
                             // low-water mark (or fully empties, which also covers `capacity == 1`),
@@ -279,7 +290,11 @@ public final class NatsSubscription: AsyncSequence, Sendable {
                             }
                             return .resume(message)
                         } else {
-                            state.continuation = continuation
+                            // Park this reader on the FIFO queue (see `State.waiters`); do NOT count
+                            // a delivery yet -- `delivered` is bumped only once a message is actually
+                            // handed back, below. A cancelled wait therefore no longer inflates the
+                            // count and prematurely trips an `unsubscribe(max:)` auto-unsubscribe.
+                            state.waiters.append((id: waiterID, cont: continuation))
                             return .suspend
                         }
                     }
@@ -290,24 +305,31 @@ public final class NatsSubscription: AsyncSequence, Sendable {
                     }
                 }
             } onCancel: {
-                // If the iteration is cancelled, wake up the suspension point and clean up
-                let continuationToResume:
-                    CheckedContinuation<Result<NatsMessage, NatsError.SubscriptionError>?, Never>? =
-                        state.withLockedValue { state in
-                            let cont = state.continuation
-                            state.continuation = nil
-                            return cont
+                // If the iteration is cancelled, wake up THIS call's suspension point (if still
+                // parked) and remove it from the queue, leaving other readers' waiters untouched.
+                let continuationToResume: ReaderContinuation? =
+                    state.withLockedValue { state in
+                        guard let idx = state.waiters.firstIndex(where: { $0.id == waiterID })
+                        else {
+                            return nil
                         }
+                        return state.waiters.remove(at: idx).cont
+                    }
                 continuationToResume?.resume(returning: nil)
             }
 
-        let delivered = state.withLockedValue { $0.delivered }
-        if let max, delivered >= max {
-            conn.removeSub(sub: self)
-        }
-
+        // Count the delivery only now that a message is actually in hand (success). A `nil`
+        // (closed/cancelled) or a failure consumes no slot, so an `unsubscribe(max:)` limit trips
+        // on messages RETURNED, not on read attempts.
         switch result {
         case .success(let msg):
+            let delivered = state.withLockedValue { state -> UInt64 in
+                state.delivered += 1
+                return state.delivered
+            }
+            if let max, delivered >= max {
+                conn.removeSub(sub: self)
+            }
             return msg
         case .failure(let error):
             throw error
