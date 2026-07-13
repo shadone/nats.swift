@@ -110,14 +110,26 @@ extension Data {
                 if msg.length == 0 {
                     serverOps.append(serverOp)
                 } else {
-                    var payload = Data()
-                    let payloadEndIndex = nextLineStartIndex + msg.length
-                    let payloadStartIndex = nextLineStartIndex
-                    // include crlf in the expected payload leangth
-                    if payloadEndIndex + Data.crlf.count > endIndex {
+                    // Validate the wire-provided payload length before deriving slice bounds. A
+                    // negative length (a syntactically valid integer on the wire) would form an
+                    // inverted slice, and an enormous length would overflow Int in the index
+                    // arithmetic below -- either turns a protocol anomaly (a misbehaving proxy or an
+                    // attacker on a non-TLS link) into a process crash. Compare against the remaining
+                    // bytes without adding to the wire value (which could overflow).
+                    guard msg.length > 0 else {
+                        throw NatsError.ProtocolError.parserFailure(
+                            "invalid MSG length: \(msg.length)")
+                    }
+                    // include crlf in the expected payload length; if the full payload+crlf is not
+                    // buffered yet, return the remainder and wait for more data.
+                    let remaining = self.endIndex - nextLineStartIndex
+                    if msg.length > remaining - Data.crlf.count {
                         remainder = self[startIndex..<self.endIndex]
                         break
                     }
+                    var payload = Data()
+                    let payloadStartIndex = nextLineStartIndex
+                    let payloadEndIndex = nextLineStartIndex + msg.length
                     payload.append(self[payloadStartIndex..<payloadEndIndex])
                     msg.payload = payload
                     startIndex =
@@ -142,6 +154,16 @@ extension Data {
                             "invalid HMSG lengths: hdr_len=\(msg.headersLength) "
                                 + "total_len=\(msg.length)")
                     }
+                    // The guard above bounds hdr_len by total_len, but total_len itself is
+                    // wire-controlled and could be enormous; comparing it against the remaining
+                    // bytes (without adding to it, which could overflow Int) both rejects an
+                    // oversized frame and preserves the "message split across reads -> return
+                    // remainder" behavior. hdr_len <= total_len, so every index below is in range.
+                    let remaining = self.endIndex - nextLineStartIndex
+                    if msg.length > remaining - Data.crlf.count {
+                        remainder = self[startIndex..<self.endIndex]
+                        break
+                    }
                     let headersStartIndex = nextLineStartIndex
                     let headersEndIndex = nextLineStartIndex + msg.headersLength
                     let payloadStartIndex = headersEndIndex
@@ -151,19 +173,16 @@ extension Data {
                     if msg.length > msg.headersLength {
                         payload = Data()
                     }
-                    var headers = NatsHeaderMap()
 
-                    // if the whole msg length (including training crlf) is longer
-                    // than the remaining chunk, break and return the remainder
-                    if payloadEndIndex + Data.crlf.count > endIndex {
-                        remainder = self[startIndex..<self.endIndex]
-                        break
-                    }
-
+                    // The header block must be valid UTF-8. Silently substituting an empty header
+                    // map on a decode failure would drop control headers (e.g. KV-Operation),
+                    // making a delete/purge marker decode as a plain put -- fail the frame instead.
                     let headersData = self[headersStartIndex..<headersEndIndex]
-                    if let headersString = String(data: headersData, encoding: .utf8) {
-                        headers = try NatsHeaderMap(from: headersString)
+                    guard let headersString = String(data: headersData, encoding: .utf8) else {
+                        throw NatsError.ProtocolError.parserFailure(
+                            "invalid HMSG header block: not valid UTF-8")
                     }
+                    let headers = try NatsHeaderMap(from: headersString)
                     msg.status = headers.status
                     msg.description = headers.description
                     msg.headers = headers

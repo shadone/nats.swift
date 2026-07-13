@@ -20,7 +20,55 @@ class ParserTests: XCTestCase {
     nonisolated(unsafe) static let allTests = [
         ("testParseOutMessages", testParseOutMessages),
         ("testMalformedHMsgLengthsThrowNotCrash", testMalformedHMsgLengthsThrowNotCrash),
+        ("testNonAsciiHeaderNameThrowsNotCrash", testNonAsciiHeaderNameThrowsNotCrash),
+        ("testMsgNegativeLengthThrowsNotCrash", testMsgNegativeLengthThrowsNotCrash),
+        ("testHugeMsgAndHmsgLengthsDoNotCrash", testHugeMsgAndHmsgLengthsDoNotCrash),
+        ("testHmsgInvalidUtf8HeaderBlockThrows", testHmsgInvalidUtf8HeaderBlockThrows),
     ]
+
+    /// Regression: a non-ASCII header name must throw, not trap. `Character.asciiValue!` was
+    /// force-unwrapped, so a single non-ASCII byte in a header name (reachable from any inbound
+    /// HMSG on a non-TLS link) crashed the process.
+    func testNonAsciiHeaderNameThrowsNotCrash() {
+        // Direct: the name validator rejects non-ASCII instead of trapping.
+        XCTAssertThrowsError(try NatsHeaderName("F\u{00FC}"))
+        XCTAssertThrowsError(try NatsHeaderName(""))  // empty name also rejected
+        // Via the wire: an HMSG whose header block is valid UTF-8 but carries a non-ASCII name.
+        let hdr = Data("NATS/1.0\r\nF\u{00FC}:bar\r\n\r\n".utf8)
+        let frame = Data("HMSG foo 1 \(hdr.count) \(hdr.count)\r\n".utf8) + hdr + Data("\r\n".utf8)
+        XCTAssertThrowsError(try frame.parseOutMessages())
+    }
+
+    /// Regression: a negative MSG payload length (a valid wire integer) must throw, not form an
+    /// inverted slice that traps. The prior sweep guarded HMSG only; plain MSG had no validation.
+    func testMsgNegativeLengthThrowsNotCrash() {
+        let neg = Data("MSG foo 1 -5\r\n0123456789\r\n".utf8)
+        XCTAssertThrowsError(try neg.parseOutMessages()) { error in
+            XCTAssertTrue(error is NatsError.ProtocolError, "expected ProtocolError, got \(error)")
+        }
+    }
+
+    /// Regression: an enormous MSG/HMSG length must not overflow Int in the index arithmetic and
+    /// trap. It is treated as an incomplete frame (returned as remainder) -- the safe outcome.
+    func testHugeMsgAndHmsgLengthsDoNotCrash() {
+        let hugeMsg = Data("MSG foo 1 9223372036854775807\r\nhello\r\n".utf8)
+        XCTAssertNoThrow(try hugeMsg.parseOutMessages())
+        let hugeHmsg = Data("HMSG foo 1 5 9223372036854775807\r\nhello world small\r\n".utf8)
+        XCTAssertNoThrow(try hugeHmsg.parseOutMessages())
+    }
+
+    /// Regression: an HMSG header block that is not valid UTF-8 must throw, not silently substitute
+    /// an empty header map (which would drop control headers -- e.g. a KV delete/purge marker would
+    /// decode as a plain put).
+    func testHmsgInvalidUtf8HeaderBlockThrows() {
+        var hdr = Data("NATS/1.0\r\nA:".utf8)
+        hdr.append(0xFF)  // invalid UTF-8 start byte inside the header value
+        hdr.append(contentsOf: Data("\r\n\r\n".utf8))
+        let frame = Data("HMSG foo 1 \(hdr.count) \(hdr.count)\r\n".utf8) + hdr + Data("\r\n".utf8)
+        XCTAssertThrowsError(try frame.parseOutMessages()) { error in
+            XCTAssertTrue(error is NatsError.ProtocolError, "expected ProtocolError, got \(error)")
+        }
+    }
 
     /// Regression: a malformed HMSG header/total length must throw a protocol error, not crash the
     /// process. `hdr_len > total_len` used to form an out-of-range slice, and `hdr_len == 0` an empty

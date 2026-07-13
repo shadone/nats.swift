@@ -31,7 +31,15 @@ public struct NatsHeaderName: Equatable, Hashable, CustomStringConvertible, Send
     private var inner: String
 
     public init(_ value: String) throws {
-        if value.contains(where: { $0 == ":" || $0.asciiValue! < 33 || $0.asciiValue! > 126 }) {
+        // A header name must be printable ASCII (33..126) with no ':'. `Character.asciiValue` is
+        // nil for any non-ASCII scalar; treat that as invalid rather than force-unwrapping, which
+        // would trap the whole process on a single non-ASCII byte arriving from the wire.
+        if value.isEmpty
+            || value.contains(where: {
+                guard let ascii = $0.asciiValue else { return true }
+                return $0 == ":" || ascii < 33 || ascii > 126
+            })
+        {
             throw NatsError.ParseHeaderError.invalidCharacter
         }
         self.inner = value
