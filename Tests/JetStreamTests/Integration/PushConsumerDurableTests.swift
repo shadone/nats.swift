@@ -182,6 +182,41 @@ final class PushConsumerDurableTests: XCTestCase {
         XCTAssertTrue(result.output.contains("cligrp"), "info should show the deliver group")
     }
 
+    /// Regression: a genuinely stalled push consumer -- the deliver subject goes silent, no message
+    /// AND no idle heartbeat, while the TCP connection stays healthy -- must SURFACE the missed
+    /// heartbeat, not loop/hang forever. `.missedHeartbeat` used to be swallowed alongside
+    /// `.idleHeartbeat` (`case .idleHeartbeat, .missedHeartbeat: continue`). Deleting the consumer
+    /// out from under the push binding produces exactly this silence (verified: no advisory reaches
+    /// the deliver subject, heartbeats just stop).
+    func testPushConsumerSurfacesMissedHeartbeatOnStall() async throws {
+        let (client, ctx) = try await setup()
+        defer { Task { try? await client.close() } }
+
+        // Push consumer with a short idle heartbeat so a stall is detected quickly.
+        let pc = try await ctx.createPushConsumer(
+            stream: "test",
+            cfg: ConsumerConfig(
+                durable: "hbpush", ackPolicy: .none, idleHeartbeat: NanoTimeInterval(0.3)))
+        let name = pc.cachedInfo.name
+
+        // Actively iterate: deliver + read one message.
+        try await ConsumeTestSupport.publish(ctx, subject: "foo.a", count: 1)
+        _ = try await pc.next(timeout: 5)
+
+        // Delete the consumer: the deliver subject goes silent (no heartbeat, no advisory).
+        try await ctx.deleteConsumer(stream: "test", name: name)
+
+        // The next read must THROW (missed heartbeat) within ~2x idleHeartbeat, not hang/end.
+        do {
+            _ = try await pc.next(timeout: 10)
+            XCTFail("a stalled push consumer must surface the stall, not hang or end silently")
+        } catch JetStreamError.FetchError.noHeartbeatReceived {
+            // expected: the genuine stall (deliver subject silence) is surfaced
+        } catch JetStreamError.FetchError.consumerDeleted {
+            // also acceptable: a server that delivers a Consumer Deleted status surfaces it too
+        }
+    }
+
     // MARK: - Helpers
 
     /// Consumes exactly `count` messages via `messages()`, acking each inline, then stops the stream.

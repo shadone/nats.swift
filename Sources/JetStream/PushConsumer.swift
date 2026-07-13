@@ -185,8 +185,16 @@ private final class PushMessageSource: MessageSource, @unchecked Sendable {
             switch event {
             case .message(let msg):
                 return JetStreamMessage(message: msg, client: ctx.client)
-            case .idleHeartbeat, .missedHeartbeat:
+            case .idleHeartbeat:
+                // A control heartbeat arrived: the consumer is alive, just no data right now.
                 continue
+            case .missedHeartbeat:
+                // No message or control heartbeat within 2x idleHeartbeat while the transport is
+                // healthy -- the consumer has stalled (e.g. paused server-side). Surface it (like
+                // consumerDeleted/leadershipChanged) instead of looping forever silently, so
+                // consume(onError:)/messages()/next() can detect and react. The ordered consumer
+                // resets on this event; a plain push consumer leaves recovery to the caller.
+                throw JetStreamError.FetchError.noHeartbeatReceived
             case .consumerDeleted:
                 throw JetStreamError.FetchError.consumerDeleted
             case .leadershipChanged:
