@@ -14,6 +14,25 @@
 import Foundation
 import NIOConcurrencyHelpers
 
+/// Internal state machine for `NatsClient.awaitConnected(timeout:)`: guarantees the
+/// checked continuation is resumed exactly once across the `.connected` event, the
+/// optional timeout, the already-connected fast path, and task cancellation -- including
+/// the window where cancellation fires before the continuation has been created. The
+/// finishing outcome is carried in the state so it is set atomically with the resume.
+private enum ConnectWait {
+    case initial
+    case waiting(CheckedContinuation<Void, Never>)
+    case cancelledEarly(ConnectWaitResult)
+    case done(ConnectWaitResult)
+}
+
+/// Why `NatsClient.awaitConnected(timeout:)` stopped waiting.
+private enum ConnectWaitResult {
+    case connected
+    case timedOut
+    case cancelled
+}
+
 extension NatsClient {
 
     /// The current connection state of the client.
@@ -42,95 +61,126 @@ extension NatsClient {
     /// established; awaiting this method lets a caller block until the connection is
     /// actually usable without having to bridge the first `.connected` event manually.
     ///
-    /// The call never throws and waits indefinitely. Use
-    /// ``NatsClient/waitForConnected(timeout:)`` to bound the wait.
+    /// The call never throws. It waits indefinitely, but honors task cancellation: if
+    /// the surrounding task is cancelled it returns early (without guaranteeing the
+    /// client is connected), so check `Task.isCancelled` or call
+    /// `Task.checkCancellation()` afterwards if you need to react. Use
+    /// ``NatsClient/waitForConnected(timeout:)`` to bound the wait with an error.
     public func waitForConnected() async {
         _ = await awaitConnected(timeout: nil)
     }
 
-    /// Suspends until the client reaches the ``NatsState/connected`` state or the
-    /// given timeout elapses.
+    /// Suspends until the client reaches the ``NatsState/connected`` state, the given
+    /// timeout elapses, or the surrounding task is cancelled.
     ///
     /// Returns immediately if the client is already connected. Behaves like
     /// ``NatsClient/waitForConnected()`` but throws instead of waiting forever.
     ///
     /// - Parameter timeout: the maximum time to wait, in seconds.
     ///
-    /// - Throws ``NatsError/ConnectError/timeout`` if the client does not become
-    ///   connected within `timeout`.
+    /// - Throws: ``NatsError/ConnectError/timeout`` if the client does not become
+    ///   connected within `timeout`, or `CancellationError` if the surrounding task is
+    ///   cancelled while waiting.
     public func waitForConnected(timeout: TimeInterval) async throws {
-        let connected = await awaitConnected(timeout: timeout)
-        if !connected {
+        switch await awaitConnected(timeout: timeout) {
+        case .connected:
+            return
+        case .timedOut:
             throw NatsError.ConnectError.timeout
+        case .cancelled:
+            throw CancellationError()
         }
     }
 
     /// Core wait implementation shared by the public overloads.
     ///
-    /// Returns `true` once the client is connected, or `false` if the optional
-    /// `timeout` elapsed first.
+    /// Returns ``ConnectWaitResult/connected`` once the client is connected,
+    /// ``ConnectWaitResult/timedOut`` if the optional `timeout` elapsed first, or
+    /// ``ConnectWaitResult/cancelled`` if the surrounding task was cancelled.
     ///
     /// Missed-signal safety: the `.connected` listener is registered *before* the
     /// current state is read. The connection handler always transitions to
-    /// ``NatsState/connected`` *before* firing the `.connected` event, so if we
-    /// observe a non-connected state below, the event has not fired yet and the
-    /// just-registered listener is guaranteed to catch it. Conversely, if we observe
-    /// `.connected`, we resume via the fast path. A single-resume guard makes the two
-    /// paths (and the timeout) mutually exclusive.
-    private func awaitConnected(timeout: TimeInterval?) async -> Bool {
+    /// ``NatsState/connected`` *before* firing the `.connected` event, so if we observe
+    /// a non-connected state below, the event has not fired yet and the just-registered
+    /// listener is guaranteed to catch it. Conversely, if we observe `.connected`, we
+    /// resume via the fast path.
+    ///
+    /// Cancellation safety: a `ConnectWait` state machine, mutated only under a lock,
+    /// resumes the continuation exactly once across the listener, the timeout task, the
+    /// fast path, and the cancellation handler -- including the window where cancellation
+    /// fires before the continuation is created.
+    private func awaitConnected(timeout: TimeInterval?) async -> ConnectWaitResult {
         guard let connectionHandler = self.connectionHandler else {
-            return false
+            return .timedOut
         }
 
-        let resumed = NIOLockedValueBox(false)
+        let stateBox = NIOLockedValueBox<ConnectWait>(.initial)
         let listenerIdBox = NIOLockedValueBox<String?>(nil)
-        let timedOut = NIOLockedValueBox(false)
         let timeoutTaskBox = NIOLockedValueBox<Task<Void, Never>?>(nil)
 
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            // Resumes the continuation at most once. Returns whether this call was the
-            // one that performed the resume.
-            let resume: @Sendable () -> Bool = {
-                let shouldResume = resumed.withLockedValue { done -> Bool in
-                    if done { return false }
-                    done = true
-                    return true
+        // Resume the continuation exactly once, recording why in the state so the outcome
+        // is set atomically with the resume. Safe to call before the continuation exists:
+        // it parks the outcome and the creation path resumes.
+        let finish: @Sendable (ConnectWaitResult) -> Void = { outcome in
+            let continuation: CheckedContinuation<Void, Never>? = stateBox.withLockedValue {
+                state in
+                switch state {
+                case .initial:
+                    // Cancellation raced ahead of the continuation; park the outcome.
+                    state = .cancelledEarly(outcome)
+                    return nil
+                case .waiting(let continuation):
+                    state = .done(outcome)
+                    return continuation
+                case .cancelledEarly, .done:
+                    return nil
                 }
-                if shouldResume {
-                    continuation.resume()
-                }
-                return shouldResume
             }
+            continuation?.resume()
+        }
 
-            // Register the `.connected` listener BEFORE reading the state (see the
-            // missed-signal note above).
-            let id = connectionHandler.addListeners(for: [.connected]) { _ in
-                _ = resume()
-            }
-            listenerIdBox.withLockedValue { $0 = id }
-
-            // Optional timeout: mark `timedOut` before resuming so the awaiting side
-            // observes the flag once it wakes up.
-            if let timeout {
-                let task = Task {
-                    try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                    let shouldResume = resumed.withLockedValue { done -> Bool in
-                        if done { return false }
-                        done = true
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                let resumeNow: Bool = stateBox.withLockedValue { state in
+                    switch state {
+                    case .cancelledEarly(let outcome):
+                        // `finish` already ran before we had a continuation to resume.
+                        state = .done(outcome)
                         return true
-                    }
-                    if shouldResume {
-                        timedOut.withLockedValue { $0 = true }
-                        continuation.resume()
+                    case .initial:
+                        state = .waiting(continuation)
+                        return false
+                    case .waiting, .done:
+                        return false
                     }
                 }
-                timeoutTaskBox.withLockedValue { $0 = task }
-            }
+                if resumeNow {
+                    continuation.resume()
+                    return
+                }
 
-            // Fast path: already connected.
-            if connectionHandler.currentState == .connected {
-                _ = resume()
+                // Register the `.connected` listener BEFORE reading the state (see the
+                // missed-signal note above).
+                let id = connectionHandler.addListeners(for: [.connected]) { _ in
+                    finish(.connected)
+                }
+                listenerIdBox.withLockedValue { $0 = id }
+
+                if let timeout {
+                    let task = Task {
+                        try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                        finish(.timedOut)
+                    }
+                    timeoutTaskBox.withLockedValue { $0 = task }
+                }
+
+                // Fast path: already connected.
+                if connectionHandler.currentState == .connected {
+                    finish(.connected)
+                }
             }
+        } onCancel: {
+            finish(.cancelled)
         }
 
         // Clean up: drop the listener and cancel any pending timeout task.
@@ -139,6 +189,9 @@ extension NatsClient {
         }
         timeoutTaskBox.withLockedValue { $0 }?.cancel()
 
-        return !timedOut.withLockedValue { $0 }
+        return stateBox.withLockedValue { state in
+            if case .done(let outcome) = state { return outcome }
+            return .cancelled
+        }
     }
 }

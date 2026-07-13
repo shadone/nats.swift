@@ -13,6 +13,7 @@
 
 import Foundation
 import Logging
+import NIOConcurrencyHelpers
 import Nats
 import NatsServer
 import XCTest
@@ -26,6 +27,14 @@ class ConnectionStateTests: XCTestCase {
             testWaitForConnectedWithRetryOnFailedConnect
         ),
         ("testWaitForConnectedTimeout", testWaitForConnectedTimeout),
+        (
+            "testWaitForConnectedRespectsCancellation",
+            testWaitForConnectedRespectsCancellation
+        ),
+        (
+            "testWaitForConnectedTimeoutThrowsOnCancellation",
+            testWaitForConnectedTimeoutThrowsOnCancellation
+        ),
         ("testConnectionStateAccessor", testConnectionStateAccessor),
     ]
 
@@ -116,6 +125,100 @@ class ConnectionStateTests: XCTestCase {
             XCTFail("Expected timeout error; got: \(error)")
         }
         XCTFail("Expected timeout error")
+    }
+
+    /// `waitForConnected()` (no timeout) honors task cancellation: a client that never
+    /// connects would otherwise wait forever, but cancelling the surrounding task makes
+    /// it return promptly. Guards against a regression to the old non-cancellable wait
+    /// (which would hang here) by bounding the wait with a task group.
+    func testWaitForConnectedRespectsCancellation() async throws {
+        logger.logLevel = .critical
+        // No server on this port: the client can never connect.
+        let client = NatsClientOptions()
+            .url(URL(string: "nats://localhost:4630")!)
+            .reconnectWait(0.1)
+            .retryOnfailedConnect()
+            .unlimitedReconnects()
+            .build()
+        try await client.connect()
+        XCTAssertFalse(client.isConnected)
+
+        let observedCancel = NIOLockedValueBox(false)
+        let waiter = Task {
+            await client.waitForConnected()
+            observedCancel.withLockedValue { $0 = Task.isCancelled }
+        }
+        // Let the wait actually suspend, then cancel it.
+        try await Task.sleep(nanoseconds: 200_000_000)
+        waiter.cancel()
+
+        // Bound the join so a regression (a hang) fails the test instead of wedging the
+        // whole suite.
+        let returned = await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                await waiter.value
+                return true
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                return false
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
+        XCTAssertTrue(
+            returned, "waitForConnected() hung on cancellation instead of returning")
+        XCTAssertTrue(
+            observedCancel.withLockedValue { $0 }, "the wait returned because of cancellation")
+        XCTAssertFalse(client.isConnected)
+
+        try? await client.close()
+    }
+
+    /// `waitForConnected(timeout:)` throws `CancellationError` (not the timeout error, and
+    /// without waiting out the deadline) when the surrounding task is cancelled.
+    func testWaitForConnectedTimeoutThrowsOnCancellation() async throws {
+        logger.logLevel = .critical
+        let client = NatsClientOptions()
+            .url(URL(string: "nats://localhost:4631")!)
+            .reconnectWait(0.1)
+            .retryOnfailedConnect()
+            .unlimitedReconnects()
+            .build()
+        try await client.connect()
+
+        struct DidNotReturn: Error {}
+        let waiter = Task { () -> Error? in
+            do {
+                // A long timeout: only cancellation (not the deadline) should end this.
+                try await client.waitForConnected(timeout: 60)
+                return nil
+            } catch {
+                return error
+            }
+        }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        waiter.cancel()
+
+        let thrown: Error? = await withTaskGroup(of: Error??.self) { group in
+            group.addTask { await waiter.value }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                return DidNotReturn()
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first ?? nil
+        }
+        XCTAssertFalse(
+            thrown is DidNotReturn,
+            "waitForConnected(timeout:) hung on cancellation instead of throwing")
+        XCTAssertTrue(
+            thrown is CancellationError,
+            "cancelled wait must throw CancellationError; got \(String(describing: thrown))")
+
+        try? await client.close()
     }
 
     /// The public `state`/`isConnected` accessors track the connection lifecycle:
