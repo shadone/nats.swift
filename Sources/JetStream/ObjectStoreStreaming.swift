@@ -220,9 +220,14 @@ extension ObjectStore {
     /// nothing and verifies trivially.
     ///
     /// The reader owns an ephemeral ordered consumer over the object's `$O.<bucket>.C.<nuid>`
-    /// chunk subject. It is torn down automatically when iteration completes, throws, or is
-    /// abandoned early (breaking out of the loop cancels the stream, which stops the
-    /// consumer), so no server-side consumer leaks.
+    /// chunk subject. It is torn down automatically when iteration completes or throws, when
+    /// the reader is deallocated (its `deinit` finishes the stream), or on an explicit
+    /// ``ObjectStreamReader/stop()``. Note that merely `break`ing out of the `for await` loop
+    /// does NOT itself stop the consumer or the background delivery: a caller that stops early
+    /// while keeping the reader in scope should call `stop()` for deterministic teardown --
+    /// otherwise the pump keeps fetching the object's remaining chunks into the reader's
+    /// buffer until the object is exhausted. Cancelling the enclosing task tears it down
+    /// promptly.
     ///
     /// - Parameters:
     ///   - name: the object name.
