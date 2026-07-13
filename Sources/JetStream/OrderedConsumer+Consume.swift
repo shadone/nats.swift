@@ -124,7 +124,14 @@ extension OrderedConsumer: MessageConsuming {
 
 /// A ``MessageSource`` over the ordered engine's reset-transparent `natsMessages` stream.
 private final class OrderedMessageSource: MessageSource, @unchecked Sendable {
-    private let consumer: OrderedConsumer
+    // Weak to break a retain cycle: the consumer holds `shared`, `shared` lazily holds the
+    // MessageStream, and the MessageStream holds this source. A strong back-reference here would
+    // keep the consumer (its actor, subscription, pump/event tasks, and connection-event listener)
+    // alive for the process lifetime even after the caller drops it and calls stop() -- every
+    // ordered consumer used through the public consume/messages/next surface would leak. PushConsumer's
+    // source deliberately avoids the same back-ref. `next()` needs only the pre-captured iterator;
+    // `teardown()` stops the consumer if it is still alive (if not, its deinit already tore it down).
+    private weak var consumer: OrderedConsumer?
     private let client: NatsClient
     private var iterator: AsyncThrowingStream<NatsMessage, Error>.Iterator
 
@@ -145,6 +152,6 @@ private final class OrderedMessageSource: MessageSource, @unchecked Sendable {
     }
 
     func teardown() async {
-        await consumer.stop()
+        await consumer?.stop()
     }
 }

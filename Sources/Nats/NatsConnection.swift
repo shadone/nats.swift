@@ -1218,6 +1218,14 @@ extension ConnectionHandler {
 
     }
 
+    /// Total registered event handlers across all event kinds. Test-only introspection for
+    /// listener-leak regression tests.
+    internal func totalEventHandlerCount() -> Int {
+        self.eventHandlerStore.withLockedValue { store in
+            store.values.reduce(0) { $0 + $1.count }
+        }
+    }
+
 }
 
 /// Nats events

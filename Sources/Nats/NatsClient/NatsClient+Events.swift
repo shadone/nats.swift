@@ -58,4 +58,10 @@ extension NatsClient {
         }
         connectionHandler.removeListener(id)
     }
+
+    /// Test-only: total registered event handlers across all event kinds (listener-leak
+    /// introspection for regression tests).
+    internal func totalEventHandlerCount() -> Int {
+        connectionHandler?.totalEventHandlerCount() ?? 0
+    }
 }

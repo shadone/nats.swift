@@ -262,6 +262,13 @@ public actor OrderedConsumer {
         continuation.finish()
         eventContinuation.finish()
         eventTask?.cancel()
+        // Remove the connection-event listener registered on the shared client. Only
+        // `finishConnectionEvents()` (reached via start-fail/stop/terminate) otherwise removes it,
+        // so a consumer dropped without an explicit stop() leaks one closure on the client forever.
+        // `off(_:)` is a plain non-isolated call, safe to invoke from deinit.
+        if let id = connListenerId {
+            ctx.client.off(id)
+        }
         if let name = currentName {
             let ctx = self.ctx
             let stream = streamName

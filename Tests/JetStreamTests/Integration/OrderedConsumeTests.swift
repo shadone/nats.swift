@@ -212,4 +212,46 @@ final class OrderedConsumeTests: XCTestCase {
             outcome ?? nil,
             "delivery stream must FAIL on exhausted reset attempts, not finish silently")
     }
+
+    /// Regression: an ordered consumer used through the public surface must deallocate after stop().
+    /// The shared MessageStream's source held a STRONG back-reference to the consumer, forming a
+    /// retain cycle (consumer -> shared -> stream -> source -> consumer). So even after stop() let
+    /// the reset pump exit (releasing its own strong self), the source cycle kept the consumer --
+    /// and its subscription, tasks, and connection-event listener -- alive for the process lifetime.
+    /// With the back-reference now weak, stop()+drop deallocates it and its listener is removed.
+    func testOrderedConsumerDeallocatesAfterStop() async throws {
+        let (client, ctx) = try await setup()
+        defer { Task { try? await client.close() } }
+        try await ConsumeTestSupport.publish(ctx, subject: "foo.a", count: 3)
+
+        // A Sendable box for the weak reference: Swift 6 forbids capturing a mutable `weak var`
+        // local in the concurrently-executing poll closures below.
+        final class WeakRef: @unchecked Sendable { weak var oc: OrderedConsumer? }
+        let ref = WeakRef()
+
+        let baseline = client.totalEventHandlerCount()
+        do {
+            let oc = try await ctx.orderedConsumer(stream: "test", cfg: OrderedConsumerConfig())
+            ref.oc = oc
+            let collector = MessageCollector()
+            // consume(...) creates the shared MessageStream + source (the object that used to form
+            // the retain cycle).
+            let cc = try oc.consume { collector.record($0) }
+            try await ConsumeTestSupport.waitUntil { collector.count >= 3 }
+            XCTAssertGreaterThan(
+                client.totalEventHandlerCount(), baseline,
+                "the consumer should have registered a connection-event listener while active")
+            cc.stop()
+            await cc.waitUntilClosed()
+        }
+        // The retain cycle is broken, so once stop() releases the pump's strong self and external
+        // refs drop, the consumer deallocates.
+        try await ConsumeTestSupport.waitUntil(10) { ref.oc == nil }
+        XCTAssertNil(ref.oc, "ordered consumer leaked after stop() (reference cycle not broken)")
+        // Teardown removed the connection-event listener, so the count returns to baseline.
+        try await ConsumeTestSupport.waitUntil(5) { client.totalEventHandlerCount() <= baseline }
+        XCTAssertLessThanOrEqual(
+            client.totalEventHandlerCount(), baseline,
+            "ordered consumer leaked its connection-event listener")
+    }
 }
