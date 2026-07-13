@@ -22,8 +22,12 @@ extension NanoTimeInterval {
     /// `"1.5s"`, `"1m30s"`); this reproduces that exact formatting.
     internal func goDurationString() -> String {
         // Round to the nearest whole nanosecond, matching the integer-nanosecond
-        // resolution of a Go `time.Duration`.
-        let nanos = Int64((value * 1_000_000_000).rounded())
+        // resolution of a Go `time.Duration`. Saturate rather than trap: an interval
+        // whose nanosecond count overflows Int64 (|value| beyond ~292 years) is
+        // nonsensical as a TTL, so clamp to the representable range instead of crashing
+        // the process on the trapping `Int64(Double)` initializer.
+        let scaled = (value * 1_000_000_000).rounded()
+        let nanos = Int64(exactly: scaled) ?? (scaled > 0 ? .max : .min)
         return NanoTimeInterval.goDurationString(nanoseconds: nanos)
     }
 

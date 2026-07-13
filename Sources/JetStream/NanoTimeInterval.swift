@@ -33,7 +33,11 @@ public struct NanoTimeInterval: Codable, Equatable, Sendable {
     /// This method allows `NanoTimeInterval` to be serialized directly into a format that stores time in nanoseconds.
     public func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
-        let nanoseconds = self.value * 1_000_000_000.0
+        // Round to a whole nanosecond: the server parses these fields as an integer
+        // `time.Duration`, so a fractional-second value (e.g. 1/3 s) must not serialize
+        // as a non-integer like `333333333.3333333`, which nats-server rejects with
+        // "cannot unmarshal number ... into ... time.Duration".
+        let nanoseconds = (self.value * 1_000_000_000.0).rounded()
         try container.encode(nanoseconds)
     }
 }

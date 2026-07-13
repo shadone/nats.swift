@@ -111,4 +111,33 @@ final class MessageTTLUnitTests: XCTestCase {
         XCTAssertNil(stream.allowMsgTTL)
         XCTAssertNil(stream.subjectDeleteMarkerTTL)
     }
+
+    // MARK: - Regression: overflow-safe formatting and integer-nanosecond encoding
+
+    /// A duration whose nanosecond count overflows Int64 (|value| beyond ~292 years)
+    /// must saturate, not crash the process on the trapping `Int64(Double)` initializer.
+    func testGoDurationStringSaturatesForOutOfRangeIntervals() {
+        // ~300 years in seconds -> more than Int64.max nanoseconds.
+        let huge = NanoTimeInterval(300 * 365 * 24 * 3600)
+        XCTAssertEqual(
+            huge.goDurationString(), NanoTimeInterval.goDurationString(nanoseconds: .max))
+        let hugeNegative = NanoTimeInterval(-300 * 365 * 24 * 3600)
+        XCTAssertEqual(
+            hugeNegative.goDurationString(),
+            NanoTimeInterval.goDurationString(nanoseconds: .min))
+    }
+
+    /// `NanoTimeInterval` must serialize a WHOLE number of nanoseconds: a fractional-second
+    /// value (whose nanosecond product is not integral) must not encode as a non-integer,
+    /// which nats-server rejects as an invalid `time.Duration`.
+    func testNanoTimeIntervalEncodesIntegerNanoseconds() throws {
+        let json = String(
+            decoding: try JSONEncoder().encode([NanoTimeInterval(1.0 / 3.0)]), as: UTF8.self)
+        XCTAssertFalse(
+            json.contains("."), "encoded nanoseconds must be an integer, got \(json)")
+
+        // Round-trips back to within a nanosecond of the original (333333333 ns).
+        let decoded = try JSONDecoder().decode([NanoTimeInterval].self, from: Data(json.utf8))
+        XCTAssertEqual(decoded[0].goDurationString(), "333.333333ms")
+    }
 }

@@ -132,10 +132,11 @@ public final class KeyValue: Sendable {
     /// does not currently hold a live value. The entry is automatically removed
     /// after `ttl` elapses.
     ///
-    /// Per-key TTLs only take effect when the bucket was created with
-    /// ``KeyValueConfig/limitMarkerTTL`` set; otherwise the TTL is silently
-    /// ignored by the server. As in nats.go, a TTL can only be attached on
-    /// create, not on `put` or `update`.
+    /// Per-key TTLs require the bucket to have been created with
+    /// ``KeyValueConfig/limitMarkerTTL`` set (which enables per-message TTL on the
+    /// backing stream); against a bucket without it the server rejects the write
+    /// rather than silently ignoring the TTL. As in nats.go, a TTL can only be
+    /// attached on create, not on `put` or `update`.
     ///
     /// - Parameters:
     ///   - key: the key to create.
