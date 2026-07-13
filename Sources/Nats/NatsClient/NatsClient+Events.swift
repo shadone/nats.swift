@@ -64,4 +64,9 @@ extension NatsClient {
     internal func totalEventHandlerCount() -> Int {
         connectionHandler?.totalEventHandlerCount() ?? 0
     }
+
+    /// Test-only: number of active subscriptions (subscription-leak introspection).
+    internal func activeSubscriptionCount() -> Int {
+        connectionHandler?.activeSubscriptionCount() ?? 0
+    }
 }

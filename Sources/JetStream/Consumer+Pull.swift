@@ -85,6 +85,7 @@ public class FetchResult: AsyncSequence {
         private let idleHeartbeat: TimeInterval?
         private var remainingMessages: Int
         private var subIterator: NatsSubscription.AsyncIterator
+        private var didUnsub = false
 
         init(
             ctx: JetStreamContext, sub: NatsSubscription, idleHeartbeat: TimeInterval?,
@@ -97,9 +98,26 @@ public class FetchResult: AsyncSequence {
             self.subIterator = sub.makeAsyncIterator()
         }
 
+        /// Unsubscribes at most once, tolerating an already-closed subscription. `unsubscribe()`
+        /// throws on an already-closed sub, which happens two ways here: the eager batch-end
+        /// unsubscribe double-firing with the trailing exhausted-batch path, and drain()/teardown()
+        /// closing the sub out from under an in-flight fetch. Both should end quietly, not surface a
+        /// spurious `subscriptionClosed`.
+        private mutating func unsubscribeOnce() async throws {
+            if didUnsub {
+                return
+            }
+            didUnsub = true
+            do {
+                try await sub.unsubscribe()
+            } catch NatsError.SubscriptionError.subscriptionClosed {
+                // Already closed (e.g. torn down by drain()/teardown()); nothing to do.
+            }
+        }
+
         public mutating func next() async throws -> JetStreamMessage? {
             if remainingMessages <= 0 {
-                try await sub.unsubscribe()
+                try await unsubscribeOnce()
                 return nil
             }
 
@@ -108,14 +126,22 @@ public class FetchResult: AsyncSequence {
 
                 if let idleHeartbeat = idleHeartbeat {
                     let timeout = idleHeartbeat * 2
-                    message = try await nextWithTimeout(timeout, subIterator)
+                    do {
+                        message = try await nextWithTimeout(timeout, subIterator)
+                    } catch {
+                        // A missed heartbeat (or any error) ends this fetch: clean up the reply-inbox
+                        // subscription, then surface the error. nextWithTimeout no longer unsubscribes
+                        // itself, so cleanup routes through the once-guard here.
+                        try? await unsubscribeOnce()
+                        throw error
+                    }
                 } else {
                     message = try await subIterator.next()
                 }
 
                 guard let message else {
                     // the subscription has ended
-                    try await sub.unsubscribe()
+                    try await unsubscribeOnce()
                     return nil
                 }
 
@@ -123,26 +149,34 @@ public class FetchResult: AsyncSequence {
 
                 switch status {
                 case .timeout:
-                    try await sub.unsubscribe()
+                    try await unsubscribeOnce()
                     return nil
                 case .idleHeartbeat:
                     // in case of idle heartbeat error, we want to
                     // wait for next message on subscription
                     continue
                 case .notFound:
-                    try await sub.unsubscribe()
+                    try await unsubscribeOnce()
                     return nil
                 case .ok:
                     remainingMessages -= 1
-                    return JetStreamMessage(message: message, client: ctx.client)
+                    let jsMessage = JetStreamMessage(message: message, client: ctx.client)
+                    if remainingMessages <= 0 {
+                        // Last message of the batch: unsubscribe now. The post-switch cleanup used to
+                        // live below but was unreachable (every arm returns/throws/continues), so the
+                        // reply-inbox subscription leaked until a SUBSEQUENT next() call -- which for
+                        // batch=1 (every Consumer.next(timeout:)) never comes.
+                        try await unsubscribeOnce()
+                    }
+                    return jsMessage
                 case .badRequest:
-                    try await sub.unsubscribe()
+                    try await unsubscribeOnce()
                     throw JetStreamError.FetchError.badRequest
                 case .noResponders:
-                    try await sub.unsubscribe()
+                    try await unsubscribeOnce()
                     throw JetStreamError.FetchError.noResponders
                 case .requestTerminated:
-                    try await sub.unsubscribe()
+                    try await unsubscribeOnce()
                     guard let description = message.description else {
                         throw JetStreamError.FetchError.invalidResponse
                     }
@@ -164,13 +198,11 @@ public class FetchResult: AsyncSequence {
                         throw JetStreamError.FetchError.unknownStatus(status, message.description)
                     }
                 default:
+                    // Unsubscribe before surfacing, matching every other terminal branch; otherwise
+                    // an unrecognized status leaks the reply-inbox subscription.
+                    try await unsubscribeOnce()
                     throw JetStreamError.FetchError.unknownStatus(status, message.description)
                 }
-
-                if remainingMessages == 0 {
-                    try await sub.unsubscribe()
-                }
-
             }
         }
 
@@ -185,34 +217,55 @@ public class FetchResult: AsyncSequence {
             if let ready = try subIterator.tryNext() {
                 return ready
             }
-            return try await withThrowingTaskGroup(of: NatsMessage?.self) { group in
+            return try await withThrowingTaskGroup(of: PullRaceOutcome.self) { group in
                 group.addTask {
-                    return try await subIterator.next()
+                    // `.ended` (a nil from the iterator) means the subscription was torn down --
+                    // e.g. drain()/teardown() unsubscribing it -- NOT a heartbeat timeout.
+                    if let msg = try await subIterator.next() {
+                        return .message(msg)
+                    }
+                    return .ended
                 }
                 // Capture the already-Sendable `sub` by value so the child task holds an
                 // immutable Sendable copy of the reference rather than implicitly capturing
                 // `self` (the `FetchIterator` region still in use by the current task).
-                // Behavior is unchanged: `sub` is a class reference.
-                group.addTask { [sub] in
+                group.addTask {
                     try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                    try await sub.unsubscribe()
-                    return nil
+                    return .heartbeatTimedOut
                 }
                 defer {
                     group.cancelAll()
                 }
-                for try await result in group {
-                    if let msg = result {
+                for try await outcome in group {
+                    switch outcome {
+                    case .message(let msg):
                         return msg
-                    } else {
+                    case .ended:
+                        // The subscription ended (torn down). Report end-of-stream, not a timeout,
+                        // so a drain() mid-wait finishes cleanly instead of surfacing a spurious
+                        // noHeartbeatReceived. The outer loop's `guard let message` then unsubscribes
+                        // (idempotent) and returns nil.
+                        return nil
+                    case .heartbeatTimedOut:
+                        // No traffic within 2x idleHeartbeat. Surface the missed heartbeat; the
+                        // caller (next()) cleans up the reply-inbox subscription via its once-guard.
                         throw JetStreamError.FetchError.noHeartbeatReceived
                     }
                 }
-                // this should not be reachable
-                throw JetStreamError.FetchError.noHeartbeatReceived
+                // Unreachable: the group always yields at least one outcome.
+                return nil
             }
         }
     }
+}
+
+/// Outcome of racing the reply-inbox read against the idle-heartbeat timer in `nextWithTimeout`.
+/// Distinguishing `.ended` (subscription torn down) from `.heartbeatTimedOut` (no traffic) is what
+/// lets a drain()/teardown() finish cleanly instead of surfacing a spurious missed heartbeat.
+private enum PullRaceOutcome: Sendable {
+    case message(NatsMessage)
+    case ended
+    case heartbeatTimedOut
 }
 
 internal struct PullRequest: Codable {

@@ -1226,6 +1226,12 @@ extension ConnectionHandler {
         }
     }
 
+    /// Number of active subscriptions. Test-only introspection for subscription-leak regression
+    /// tests (e.g. reply-inbox subscriptions left open by a pull fetch).
+    internal func activeSubscriptionCount() -> Int {
+        self.subscriptions.withLockedValue { $0.count }
+    }
+
 }
 
 /// Nats events

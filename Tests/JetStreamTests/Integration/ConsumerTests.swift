@@ -13,9 +13,11 @@
 
 import JetStream
 import Logging
-import Nats
+import NIOConcurrencyHelpers
 import NatsServer
 import XCTest
+
+@testable import Nats
 
 class ConsumerTests: XCTestCase {
 
@@ -28,6 +30,11 @@ class ConsumerTests: XCTestCase {
         ("testNak", testNak),
         ("testNakWithDelay", testNakWithDelay),
         ("testTerm", testTerm),
+        (
+            "testNextTimeoutDoesNotLeakReplyInboxSubscription",
+            testNextTimeoutDoesNotLeakReplyInboxSubscription
+        ),
+        ("testDrainDuringIdleFinishesCleanly", testDrainDuringIdleFinishesCleanly),
     ]
 
     var natsServer = NatsServer()
@@ -35,6 +42,92 @@ class ConsumerTests: XCTestCase {
     override func tearDown() {
         super.tearDown()
         natsServer.stop()
+    }
+
+    /// Spins up a JetStream server + client + stream `test` (subjects `foo.*`) + a named pull
+    /// consumer with no-ack, for the leak/drain regression tests below.
+    private func makePullConsumer(
+        name: String = "cons"
+    ) async throws
+        -> (NatsClient, JetStreamContext, Consumer)
+    {
+        let bundle = Bundle.module
+        natsServer.start(
+            cfg: bundle.url(forResource: "jetstream", withExtension: "conf")!.relativePath)
+        logger.logLevel = .critical
+        let client = NatsClientOptions().url(URL(string: natsServer.clientURL)!).build()
+        try await client.connect()
+        let ctx = JetStreamContext(client: client)
+        let stream = try await ctx.createStream(
+            cfg: StreamConfig(name: "test", subjects: ["foo.*"]))
+        let consumer = try await stream.createConsumer(
+            cfg: ConsumerConfig(name: name, ackPolicy: .none))
+        return (client, ctx, consumer)
+    }
+
+    /// Regression: `next(timeout:)` is a `fetch(batch: 1)`, and a batch that ends exactly on its
+    /// last `.ok` used to never unsubscribe (the post-switch cleanup was unreachable), leaking the
+    /// reply-inbox subscription on EVERY call. Publish upfront (so the baseline excludes the publish
+    /// path), poll 15 messages one at a time, and assert the active subscription count does not grow.
+    func testNextTimeoutDoesNotLeakReplyInboxSubscription() async throws {
+        let (client, ctx, consumer) = try await makePullConsumer()
+        defer { Task { try? await client.close() } }
+
+        let payload = "hi".data(using: .utf8)!
+        for _ in 0..<15 {
+            _ = try await ctx.publish("foo.A", message: payload).wait()
+        }
+
+        // Baseline AFTER publishing, so only the next() reply-inbox subscriptions are measured.
+        let baseline = client.activeSubscriptionCount()
+        for _ in 0..<15 {
+            let msg = try await consumer.next(timeout: 5)
+            XCTAssertNotNil(msg)
+        }
+
+        var count = client.activeSubscriptionCount()
+        for _ in 0..<20 where count > baseline {
+            try await Task.sleep(nanoseconds: 100_000_000)
+            count = client.activeSubscriptionCount()
+        }
+        XCTAssertLessThanOrEqual(
+            count, baseline,
+            "next(timeout:) leaked reply-inbox subscriptions (\(count) vs baseline \(baseline))")
+    }
+
+    /// Regression: `drain()`-ing a `consume()` loop while it idles waiting for more messages must
+    /// finish CLEANLY. The idle-heartbeat race conflated "subscription torn down" (drain) with
+    /// "heartbeat timed out", so drain surfaced a spurious `noHeartbeatReceived` via `onError`.
+    func testDrainDuringIdleFinishesCleanly() async throws {
+        let (client, ctx, consumer) = try await makePullConsumer()
+        defer { Task { try? await client.close() } }
+
+        let payload = "hi".data(using: .utf8)!
+        for _ in 0..<3 {
+            _ = try await ctx.publish("foo.A", message: payload).wait()
+        }
+
+        let collected = NIOLockedValueBox(0)
+        let errorBox = NIOLockedValueBox<Error?>(nil)
+        let cc = try consumer.consume(
+            { _ in collected.withLockedValue { $0 += 1 } },
+            onError: { err in errorBox.withLockedValue { $0 = err } })
+
+        // Wait for the 3 delivered, then let the loop enter its idle wait for more.
+        let deadline = Date().addingTimeInterval(10)
+        while collected.withLockedValue({ $0 }) < 3, Date() < deadline {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        cc.drain()
+        await cc.waitUntilClosed()
+
+        XCTAssertNil(
+            errorBox.withLockedValue { $0 },
+            "drain() during idle surfaced an error: \(String(describing: errorBox.withLockedValue { $0 }))"
+        )
+        XCTAssertEqual(collected.withLockedValue { $0 }, 3)
     }
 
     func testFetchWithDefaultOptions() async throws {
