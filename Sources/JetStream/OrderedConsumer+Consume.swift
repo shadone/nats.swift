@@ -101,12 +101,18 @@ extension OrderedConsumer: MessageConsuming {
     public nonisolated func consume(
         _ handler: @escaping MessageHandler, onError: ConsumeErrorHandler? = nil
     ) throws -> ConsumeContext {
-        JetStreamConsumeContext(stream: orderedStream(), handler: handler, onError: onError)
+        // `owner: self` pins this consumer for the returned context's lifetime. The ordered engine's
+        // pump holds only `[weak self]`, and `OrderedMessageSource` references the consumer weakly, so
+        // without this a caller holding only the context would race the consumer's deallocation and
+        // silently lose delivery (its deinit deletes the server consumer and finishes the stream).
+        JetStreamConsumeContext(
+            stream: orderedStream(), handler: handler, onError: onError, owner: self)
     }
 
     /// Iterates ordered messages as an `AsyncSequence`.
     public nonisolated func messages() throws -> any MessagesContext {
-        JetStreamMessagesContext(stream: orderedStream())
+        // `owner: self` pins this consumer for the context/iterator lifetime; see `consume(_:onError:)`.
+        JetStreamMessagesContext(stream: orderedStream(), owner: self)
     }
 
     /// Retrieves the next ordered message, waiting at most `timeout` seconds.

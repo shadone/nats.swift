@@ -228,13 +228,24 @@ final class MessageStream: @unchecked Sendable {
 final class JetStreamConsumeContext: ConsumeContext, @unchecked Sendable {
     private let stream: MessageStream
     private let task: Task<Void, Never>
+    // Optional strong reference to the consumer whose engine feeds `stream`. An ordered consumer's
+    // delivery is driven by its own pump `Task { [weak self] ... }`, and its `OrderedMessageSource`
+    // references it only weakly (to avoid a retain cycle). So nothing in the stream/source chain keeps
+    // the consumer alive: a caller that drops the consumer handle and keeps only this context races
+    // the pump's weak-self load against ARC releasing the consumer -- if the consumer wins, its
+    // `deinit` deletes the server consumer and finishes the stream, silently stopping delivery.
+    // Pinning it here (this context is caller-owned, so no cycle) keeps the engine alive for the
+    // context's lifetime, matching push/pull consumers. Nil for consumers that need no pin.
+    private let owner: (any Sendable)?
 
     init(
         stream: MessageStream,
         handler: @escaping MessageHandler,
-        onError: ConsumeErrorHandler?
+        onError: ConsumeErrorHandler?,
+        owner: (any Sendable)? = nil
     ) {
         self.stream = stream
+        self.owner = owner
         stream.start()
         self.task = Task {
             do {
@@ -288,15 +299,24 @@ final class JetStreamMessagesContext: MessagesContext, @unchecked Sendable {
     typealias Element = JetStreamMessage
 
     private let stream: MessageStream
+    // See `JetStreamConsumeContext.owner`. Captured into each iterator too, so an iterator that
+    // outlives this context (a supported pattern) still keeps the ordered engine alive.
+    private let owner: (any Sendable)?
 
-    init(stream: MessageStream) {
+    init(stream: MessageStream, owner: (any Sendable)? = nil) {
         self.stream = stream
+        self.owner = owner
         stream.start()
     }
 
     func makeAsyncIterator() -> JetStreamMessageIterator {
         let stream = self.stream
-        return JetStreamMessageIterator { try await stream.next() }
+        let owner = self.owner
+        return JetStreamMessageIterator {
+            // Retain the consumer for the iterator's lifetime (see `owner`).
+            _ = owner
+            return try await stream.next()
+        }
     }
 
     func stop() {

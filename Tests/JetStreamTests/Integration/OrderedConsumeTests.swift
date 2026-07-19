@@ -254,4 +254,64 @@ final class OrderedConsumeTests: XCTestCase {
             client.totalEventHandlerCount(), baseline,
             "ordered consumer leaked its connection-event listener")
     }
+
+    /// A returned `ConsumeContext` must keep delivering after the caller drops the `OrderedConsumer`
+    /// handle and holds only the context.
+    ///
+    /// The ordered engine's pump holds only `[weak self]` and `OrderedMessageSource` references the
+    /// consumer weakly, so nothing in the stream/source chain keeps the consumer alive. Without the
+    /// context pinning it (`owner: self`), a caller that keeps only the context races the pump's
+    /// weak-self load against ARC releasing the consumer: if the consumer loses, its `deinit` deletes
+    /// the server consumer and finishes the stream, silently stopping delivery. Observed as a ~50%
+    /// flaky stall of the perf harness's `orderedConsume` scenario (release build, external server),
+    /// where the server showed the stream's messages present but the consumer already deleted.
+    func testConsumeSurvivesDroppedConsumerHandle() async throws {
+        let (client, ctx) = try await setup()
+        defer { Task { try? await client.close() } }
+
+        let collector = MessageCollector()
+        try await ConsumeTestSupport.publish(ctx, subject: "foo.a", count: 20)
+
+        // Build the consumer and its context, then let the consumer go out of scope: only the
+        // context escapes.
+        func detach() async throws -> ConsumeContext {
+            let oc = try await ctx.orderedConsumer(stream: "test", cfg: OrderedConsumerConfig())
+            return try oc.consume { collector.record($0) }
+        }
+        let cc = try await detach()
+
+        try await ConsumeTestSupport.waitUntil { collector.count >= 20 }
+        cc.stop()
+        await cc.waitUntilClosed()
+
+        XCTAssertEqual(collector.sequences, Array(1...20))
+    }
+
+    /// The same guarantee for `messages()`: holding only the messages context (having dropped the
+    /// consumer handle) must keep delivering.
+    func testMessagesSurvivesDroppedConsumerHandle() async throws {
+        let (client, ctx) = try await setup()
+        defer { Task { try? await client.close() } }
+
+        try await ConsumeTestSupport.publish(ctx, subject: "foo.a", count: 20)
+
+        func detach() async throws -> any MessagesContext {
+            let oc = try await ctx.orderedConsumer(stream: "test", cfg: OrderedConsumerConfig())
+            return try oc.messages()
+        }
+        let messages = try await detach()
+
+        let collector = MessageCollector()
+        let pump = Task {
+            for try await msg in messages {
+                collector.record(msg)
+            }
+        }
+        defer { pump.cancel() }
+
+        try await ConsumeTestSupport.waitUntil { collector.count >= 20 }
+        messages.stop()
+
+        XCTAssertEqual(collector.sequences, Array(1...20))
+    }
 }
