@@ -109,3 +109,23 @@ jobs:
         rc=$?
         ./Sources/Scenarios/fault/toxiproxy-down.sh || true
         exit $rc
+
+  tsan:
+    name: ThreadSanitizer (full suite)
+    runs-on: ubuntu-latest
+    container: swift:6.2
+    # Full suite under TSan is slow (~2-5x), so it lives in nightly rather than blocking every push.
+    # Informational until proven non-flaky under the sanitizer's slowdown (timing-bounded tests).
+    continue-on-error: true
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install build prerequisites
+      run: |
+        apt-get update -qq
+        apt-get install -y -qq libsodium-dev curl
+    - name: Install nats-server and nats CLI
+      run: |
+        curl --fail https://binaries.nats.dev/nats-io/nats-server/v2@latest | PREFIX='/usr/local/bin' sh
+        curl --fail https://binaries.nats.dev/nats-io/natscli/nats@latest | PREFIX='/usr/local/bin' sh
+    - name: Test (thread sanitizer)
+      run: swift test --sanitize=thread

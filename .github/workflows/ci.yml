@@ -76,27 +76,6 @@ jobs:
             || { echo "stress iteration $i FAILED (a consumer stalled)"; exit 1; }
         done
 
-  linux-tsan:
-    name: Linux ThreadSanitizer (informational)
-    runs-on: ubuntu-latest
-    container: swift:6.2
-    # Informational for now: TSan slows the client ~2-5x, which can trip the tightest
-    # timing-bounded tests (e.g. the <4s reconnect-recovery assertion). Promote to a hard gate
-    # once those are tuned for the sanitizer. Real data-race reports are still surfaced in the log.
-    continue-on-error: true
-    steps:
-    - uses: actions/checkout@v4
-    - name: Install build prerequisites (libsodium, curl)
-      run: |
-        apt-get update -qq
-        apt-get install -y -qq libsodium-dev curl
-    - name: Install nats-server and nats CLI
-      run: |
-        curl --fail https://binaries.nats.dev/nats-io/nats-server/v2@latest | PREFIX='/usr/local/bin' sh
-        curl --fail https://binaries.nats.dev/nats-io/natscli/nats@latest | PREFIX='/usr/local/bin' sh
-    - name: Test (thread sanitizer)
-      run: swift test --sanitize=thread
-
   macos:
     name: macOS build + test
     runs-on: macos-15
