@@ -1,13 +1,37 @@
 ![NATS Swift Client](./Resources/Logo@256.png)
 
 [![License Apache 2](https://img.shields.io/badge/License-Apache2-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
-[![](https://img.shields.io/endpoint?url=https%3A%2F%2Fswiftpackageindex.com%2Fapi%2Fpackages%2Fnats-io%2Fnats.swift%2Fbadge%3Ftype%3Dswift-versions)](https://swiftpackageindex.com/nats-io/nats.swift)
-[![](https://img.shields.io/endpoint?url=https%3A%2F%2Fswiftpackageindex.com%2Fapi%2Fpackages%2Fnats-io%2Fnats.swift%2Fbadge%3Ftype%3Dplatforms)](https://swiftpackageindex.com/nats-io/nats.swift)
 
+# NATS Swift Client (fork)
 
+**This is a fork of [`nats-io/nats.swift`](https://github.com/nats-io/nats.swift) with major additions.**
+Upstream is Core NATS only. This fork closes the gaps that kept the Swift client
+off par with `nats.go` and `async-nats` (Rust): the full JetStream surface,
+the Service API, Swift 6, Linux, and a fix for a silent JetStream publish bug that
+affects every upstream user.
 
+**What's new on top of upstream:**
 
-# NATS Swift Client
+- **Full JetStream** — KeyValue and ObjectStore, ordered/push/durable consumers,
+  per-message and per-key TTL, async batched publish. Upstream has none of it.
+- **Fixed a silent CAS-publish bug** — upstream mis-decodes a failed `PubAck`, so
+  every `expected-last-seq` / msg-id-dedup publish failure is swallowed
+  library-wide. Fixed here.
+- **Service (micro) API** — the `Services` module: endpoints/groups, `$SRV`
+  discovery, per-endpoint stats.
+- **Swift 6 language mode** — the whole package builds under `swiftLanguageModes: [.v6]`
+  with strict concurrency enforced as errors.
+- **Linux** — builds and passes the full suite on Linux; upstream CI is macOS/iOS only.
+- **Hardened core** — slow-consumer overflow surfaces as an `.error` event (was a
+  silent drop) over an amortized-O(1) buffer (was O(n²) drain), plus three
+  adversarial correctness sweeps over the transport, reset engine, and parser.
+
+**Status:** 332 tests, 0 failures, green on macOS and Linux (iOS build in CI).
+Full fork-vs-upstream matrix and the commit-by-commit story: [FIRSTCLASS.md](./FIRSTCLASS.md).
+Not affiliated with the NATS.io maintainers and not submitted upstream — pin it
+yourself if you want it.
+
+---
 
 Welcome to the [Swift](https://www.swift.org) Client for [NATS](https://nats.io),
 your gateway to asynchronous messaging in Swift applications. This client library
@@ -16,10 +40,9 @@ messaging, enabling swift and efficient communication across distributed systems
 
 ## Features
 
-Currently, the client supports **Core NATS** with auth, TLS, lame duck mode and more.
-
-**On the `firstclass-kv` branch** (an experiment bringing the client toward
-`nats.go`/`async-nats` parity — see [FIRSTCLASS.md](./FIRSTCLASS.md)):
+The base client supports **Core NATS** with auth, TLS, lame duck mode and more.
+On top of that, this fork adds (see [FIRSTCLASS.md](./FIRSTCLASS.md) for the full
+matrix):
 
 - **JetStream KeyValue** — buckets, get/put/create/update/delete/purge with
   optimistic concurrency, status, hang-safe `watch`/`watchAll`/`keys`/
@@ -44,7 +67,7 @@ Currently, the client supports **Core NATS** with auth, TLS, lame duck mode and 
   `unlimitedReconnects()`.
 
 - **Cross-platform** — builds and runs on **macOS, iOS, and Linux**; the full
-  test suite (308 tests) passes on macOS and Linux, with an iOS build in CI.
+  test suite (332 tests) passes on macOS and Linux, with an iOS build in CI.
 
 The whole package builds under **Swift 6 language mode**
 (`swiftLanguageModes: [.v6]`) with strict concurrency enforced. Benchmarks and a
@@ -75,8 +98,10 @@ for try await update in watcher {
 
 ## Support
 
-Join the [#swift](https://natsio.slack.com/channels/swift) channel on nats.io Slack.
-We'll do our best to help quickly. You can also just drop by and say hello. We're looking forward to developing the community.
+For anything specific to this fork — JetStream, the Service API, a bug in the
+added surface — open an issue on this repo. For general NATS questions, the
+[#swift](https://natsio.slack.com/channels/swift) channel on nats.io Slack is the
+place; note the maintainers there don't own this fork.
 
 ## Installation via Swift Package Manager
 
@@ -84,7 +109,9 @@ We'll do our best to help quickly. You can also just drop by and say hello. We'r
 Linux, first install the system libsodium that the `nkeys.swift` dependency links
 (`apt-get install -y libsodium-dev`).
 
-Include this package as a dependency in your project's `Package.swift` file and add the package name to your target as shown in the following example:
+This fork has no tagged release — pin it by branch. Include it as a dependency in
+your `Package.swift` and add the modules you need to your target (`Nats` for Core
+NATS, `JetStream` for KV/ObjectStore/consumers, `Services` for the micro API):
 
 ```swift
 // swift-tools-version:6.0
@@ -97,10 +124,13 @@ let package = Package(
         .executable(name: "YourApp", targets: ["YourApp"]),
     ],
     dependencies: [
-        .package(name: "Nats", url: "https://github.com/nats-io/nats.swift.git", from: "0.1")
+        .package(url: "https://github.com/shadone/nats.swift.git", branch: "main")
     ],
     targets: [
-        .target(name: "YourApp", dependencies: ["Nats"]),
+        .target(name: "YourApp", dependencies: [
+            .product(name: "Nats", package: "nats.swift"),
+            .product(name: "JetStream", package: "nats.swift"),
+        ]),
     ]
 )
 
@@ -109,7 +139,7 @@ let package = Package(
 ### Xcode Package Dependencies
 
 Open the project inspector in Xcode and select your project. It is important to select the **project** and not a target!
-Click on the third tab `Package Dependencies` and add the git url `https://github.com/nats-io/nats.swift.git` by selecting the little `+`-sign at the end of the package list.
+Click on the third tab `Package Dependencies` and add the git url `https://github.com/shadone/nats.swift.git` by selecting the little `+`-sign at the end of the package list; set the dependency rule to **Branch → `main`**.
 
 ## Basic Usage
 
@@ -256,4 +286,6 @@ func sceneWillResignActive(_ scene: UIScene) {
 
 ## Attribution
 
-This library is based on excellent work in https://github.com/aus-der-Technik/SwiftyNats
+Forked from [`nats-io/nats.swift`](https://github.com/nats-io/nats.swift) — all the
+Core NATS groundwork is theirs. That client in turn builds on the excellent work in
+https://github.com/aus-der-Technik/SwiftyNats.
