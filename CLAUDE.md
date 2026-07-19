@@ -107,9 +107,10 @@ Integration tests use `NatsServer` helper to spawn local NATS server instances w
 
 - Platforms: macOS 13.0+, iOS 13.0+, and Linux (glibc). Linux needs the system libsodium (`libsodium-dev`) for the nkeys.swift dependency.
 - Requires a Swift 6.0+ toolchain; the package builds in the Swift 6 language mode (`swiftLanguageModes: [.v6]`) with strict concurrency enforced as errors.
+- The LIBRARY builds on Swift 6.0, but the TEST SUITE needs 6.1+: Swift 6.0's XCTest rejects async test methods with `error: implicit capture of 'self' requires that '<TestCase>' conforms to Sendable` (6.1 relaxed it). A newer local toolchain (6.2) also silently accepts region-isolation/Sendable the CI's older Swift rejects — a passing local build is not proof CI passes; the version matrix is what catches it.
 - WebSocket upgrade support available for browser-compatible connections
 - Batch message processing optimized with `BatchBuffer` for performance
-- CI (`.github/workflows/ci.yml`): macOS build + test, iOS build, Linux (`swift:6.2` container) build + test, swift-format lint, and DocC build. The full suite (332 tests) passes on both macOS and Linux.
+- CI is Linux-first (`.github/workflows/ci.yml`): a Swift `6.0`/`6.1`/`6.2` matrix (build on 6.0, full test on 6.1/6.2), a release build + a looped `PerfBench` consumer-stress gate, macOS build+test (the only place the CryptoKit path runs) + iOS, lint, and DocC. Heavier suites — soak, 3-node cluster failover, toxiproxy fault injection, ThreadSanitizer — run nightly (`.github/workflows/nightly.yml`). The full suite (334 tests) passes on macOS and Linux.
 - Cross-platform note: CryptoKit / Combine / `URLSession` file reads are Apple-only; use `#if canImport(CryptoKit)` + `Crypto`, avoid Combine, and read local files with `Data(contentsOf:)` (see `Sources/JetStream/ObjectStore.swift` and `Sources/Nats/NatsConnection.swift`).
 
 ## Testing gotchas
@@ -120,3 +121,5 @@ Integration tests use `NatsServer` helper to spawn local NATS server instances w
 - New XCTest cases: match the file's convention — some register in a `static let allTests` array (legacy manifest), others rely on auto-discovery.
 - Swift 6 strict concurrency forbids capturing a mutable local or `weak var` in a `@Sendable`/task-group closure; wrap it in a small `@unchecked Sendable` box in test code.
 - `msg.payload` is `Data?` (optional); JetStream `next(timeout:)` / pull `fetch(batch: 1)` create a reply-inbox subscription per call.
+- Some lifetime/delivery races only manifest in a RELEASE build against an external server (ARC releases at last use; the in-process debug test scheduler hides them). Verify ordered/push consumer lifetime fixes by LOOPING the release harness — `swift build -c release --product PerfBench`, then a loop of `./.build/release/PerfBench --scenario orderedConsume,pushConsume,pullConsume --msgs N` — not only `swift test`.
+- Scripting a release test + an executable build together: run `swift test -c release` FIRST — a prior `swift build -c release` caches a non-testable `Nats`, so `@testable import` then fails with "module was not compiled for testing".
