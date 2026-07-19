@@ -314,4 +314,37 @@ final class OrderedConsumeTests: XCTestCase {
 
         XCTAssertEqual(collector.sequences, Array(1...20))
     }
+
+    /// Stress the dropped-handle path: repeat "publish backlog → detached ordered consumer → drain →
+    /// stop → delete stream" many times on one connection. The dropped-handle delivery-stall race is
+    /// timing-dependent (the in-process test scheduler usually wins it for the pump, so a single run
+    /// rarely reproduces it), but looping it widens the window and guards against regressions,
+    /// especially under a release build. Each round is bounded by `waitUntil`, so a stalled round
+    /// fails fast rather than hanging.
+    func testDetachedOrderedConsumeStress() async throws {
+        let client = try await ConsumeTestSupport.connect(natsServer)
+        defer { Task { try? await client.close() } }
+        let ctx = JetStreamContext(client: client)
+
+        for round in 0..<30 {
+            let stream = "stress\(round)"
+            _ = try await ctx.createStream(
+                cfg: StreamConfig(name: stream, subjects: ["s\(round).*"]))
+            try await ConsumeTestSupport.publish(ctx, subject: "s\(round).a", count: 20)
+
+            let collector = MessageCollector()
+            func detach() async throws -> ConsumeContext {
+                let oc = try await ctx.orderedConsumer(stream: stream, cfg: OrderedConsumerConfig())
+                return try oc.consume { collector.record($0) }
+            }
+            let cc = try await detach()
+
+            try await ConsumeTestSupport.waitUntil(8) { collector.count >= 20 }
+            XCTAssertEqual(
+                collector.sequences, Array(1...20), "round \(round): delivery must be complete")
+            cc.stop()
+            await cc.waitUntilClosed()
+            try? await ctx.deleteStream(name: stream)
+        }
+    }
 }

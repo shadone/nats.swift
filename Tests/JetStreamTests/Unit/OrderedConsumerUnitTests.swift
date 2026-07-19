@@ -141,6 +141,60 @@ final class OrderedConsumerUnitTests: XCTestCase {
         XCTAssertEqual(cursor.streamSeq, 10, "streamSeq stays at the last accepted message")
     }
 
+    /// Property/model test of the whole no-loss / no-dup guarantee: drive the cursor + the recreate
+    /// rule (resume from `streamSeq + 1`, deliver-seq reset to 0) through many RANDOM schedules of
+    /// dropped deliveries (deliver-seq gaps) and spontaneous resets (missed heartbeats), and assert
+    /// the yielded stream sequences are always EXACTLY `1...N` — contiguous, no gap, no duplicate.
+    /// A seeded PRNG makes any failure reproducible by its seed.
+    func testCursorNoLossNoDupUnderRandomGapsAndResets() {
+        for seed in UInt64(0)..<400 {
+            var rng = SeededXorshift(seed: seed)
+            let total = 5 + rng.next() % 40  // 5...44 messages in the stream
+            var cursor = OrderedConsumerCursor()
+            var yielded: [UInt64] = []
+            var guardCount = 0
+
+            // Each outer iteration models one consumer generation created by `recreate()`.
+            while cursor.streamSeq < total {
+                cursor.consumerSeq = 0  // recreate resets deliver-seq tracking
+                var deliverSeq: UInt64 = 0
+                var streamSeq = cursor.streamSeq + 1  // recreate resumes from the next stream seq
+
+                generation: while streamSeq <= total {
+                    deliverSeq += 1  // server assigns a deliver seq to every message it sends
+
+                    // Spontaneous reset (missed heartbeat / consumer deleted) with no gap: the outer
+                    // loop recreates from `streamSeq + 1`; nothing yielded is lost because the cursor
+                    // only advanced for accepted messages.
+                    if rng.next() % 12 == 0 {
+                        break generation
+                    }
+                    // Drop this delivery before the client sees it: the next RECEIVED message's
+                    // deliver seq will skip, which the accept-check must catch as a gap.
+                    if rng.next() % 6 == 0 {
+                        streamSeq += 1
+                        continue generation
+                    }
+
+                    switch cursor.evaluate(deliverSeq: deliverSeq, streamSeq: streamSeq) {
+                    case .accept:
+                        yielded.append(streamSeq)
+                        streamSeq += 1
+                    case .gap:
+                        break generation  // discard + recreate from streamSeq + 1
+                    }
+
+                    guardCount += 1
+                    XCTAssertLessThan(guardCount, 1_000_000, "seed \(seed): did not converge")
+                }
+            }
+
+            XCTAssertEqual(
+                yielded, Array(1...total),
+                "seed \(seed): yielded stream sequences must be exactly 1...\(total) (no loss/dup)")
+        }
+    }
+
     /// Builds ``MessageMetadata`` from a `$JS.ACK` reply subject (v1 token layout).
     private func metadata(streamSeq: UInt64, deliverSeq: UInt64) throws -> MessageMetadata {
         // $JS.ACK.<stream>.<consumer>.<delivered>.<streamSeq>.<consumerSeq>.<ts>.<pending>
@@ -222,5 +276,23 @@ final class OrderedConsumerUnitTests: XCTestCase {
         NatsMessage(
             payload: nil, subject: "inbox", replySubject: nil, length: 0,
             headers: headers, status: .idleHeartbeat, description: "Idle Heartbeat")
+    }
+}
+
+/// A tiny seeded xorshift64* PRNG so the property test above is deterministic and a failure
+/// reproduces from its seed. Not for cryptographic use.
+private struct SeededXorshift {
+    private var state: UInt64
+
+    init(seed: UInt64) {
+        // Avoid the all-zero state (xorshift's fixed point); any non-zero seed mixing works.
+        state = seed &* 0x9E37_79B9_7F4A_7C15 | 1
+    }
+
+    mutating func next() -> UInt64 {
+        state ^= state >> 12
+        state ^= state << 25
+        state ^= state >> 27
+        return state &* 0x2545_F491_4F6C_DD1D
     }
 }
