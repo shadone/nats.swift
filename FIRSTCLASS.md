@@ -1,11 +1,11 @@
 # Making nats.swift a first-class, general-purpose NATS client
 
-This document records an experiment: taking the community
-[`nats.swift`](https://github.com/nats-io/nats.swift) client (at `v0.4.0`+, tag
-`a9031f1`) and closing the gaps that kept it from being a first-class,
+This document records the work behind this fork: taking the community
+[`nats.swift`](https://github.com/nats-io/nats.swift) client (forked at `v0.4.0`+,
+tag `a9031f1`) and closing the gaps that kept it from being a first-class,
 production-grade, general-purpose NATS client on par with `nats.go` and
-`async-nats` (Rust). The work lives on branch `firstclass-kv`; nothing here is
-deployed.
+`async-nats` (Rust). It lives on `main` of this fork. It is not affiliated with
+the upstream maintainers and has not been submitted upstream.
 
 It began from a concrete need — a real Swift service had to
 hand-roll ~330 lines of KV over the JetStream wire protocol, write a temp
@@ -18,12 +18,12 @@ clients build it, as a real contribution to the library.
 A first-class JetStream + Services surface, then performance, chaos, and platform
 hardening. Every commit builds clean, passes against a real `nats-server`, is
 `swift format`-clean, and was reviewed by an independent pass (correctness +
-Swift-6 concurrency) with findings fixed before commit. The suite is **308 tests,
+Swift-6 concurrency) with findings fixed before commit. The suite is **332 tests,
 0 failures**, green on **macOS and Linux** (plus an iOS build in CI).
 
 ### Fork vs. upstream at a glance
 
-| Area | Upstream `nats.swift` (v0.4.0+) | This fork (`firstclass-kv`) |
+| Area | Upstream `nats.swift` (v0.4.0+) | This fork (`main`) |
 | --- | --- | --- |
 | Core NATS — pub/sub, req/reply, headers, auth, TLS, WebSocket, lame-duck | Yes | Yes |
 | In-memory credentials, `ignoreDiscoveredServers()` | File creds only | Yes |
@@ -38,7 +38,7 @@ Swift-6 concurrency) with findings fixed before commit. The suite is **308 tests
 | Per-message / per-key TTL (NATS 2.11+) | No | Yes |
 | Service (micro) API | No | Yes — the `Services` module |
 | Swift 6 language mode | No | Yes — strict concurrency as errors |
-| Linux | No (CI is macOS/iOS only) | Yes — builds + 308/308 tests |
+| Linux | No (CI is macOS/iOS only) | Yes — builds + 332/332 tests |
 | Slow-consumer handling | Silent drop, O(n²) drain | `.error` event, amortized-O(1) buffer |
 | Tooling | macOS/iOS + lint CI | + Linux build/test CI, DocC, `PerfBench` |
 
@@ -192,7 +192,7 @@ Beyond the initial surface, several passes brought it to production polish:
   credential/nkey files are read with `Data(contentsOf:)` (`URLSession` rejects
   `file://` on swift-corelibs-foundation), and `swift-sodium` is pinned to 0.9.x
   so it builds against the stable libsodium (1.0.18) on Linux distros. Verified in
-  a `swift:6.2` container: 308/308, identical to macOS.
+  a `swift:6.2` container: 332/332, identical to macOS.
 
 ## A bug fixed for everyone, not just KV
 
@@ -220,14 +220,15 @@ sequentially, which set the pace more than the difficulty did.
 
 ### By the numbers
 
-- **47 commits** on `firstclass-kv`: the KV store, the ordered/push consumer
-  engine, the public consumer API, the ObjectStore (incl. streaming IO), the
-  `Services` module, per-message + KV TTL, durable/queue-group push consumers,
+- **63 commits** over upstream `nats-io/main`: the KV store, the ordered/push
+  consumer engine, the public consumer API, the ObjectStore (incl. streaming IO),
+  the `Services` module, per-message + KV TTL, durable/queue-group push consumers,
   async batched publish, the Swift 6 language-mode adoption, the performance/chaos
   hardening (harness, suite, hot-path fixes), reconnect resilience, a
-  silent-failure audit, DocC catalogs, semi-manual cluster/fault/probe runbooks,
-  CI, and Linux support.
-- **308 tests, 0 failures** against a real `nats-server`, green on **macOS and
+  silent-failure audit, three adversarial correctness sweeps over the transport,
+  reset engine, and parser, DocC catalogs, semi-manual cluster/fault/probe
+  runbooks, CI, and Linux support.
+- **332 tests, 0 failures** against a real `nats-server`, green on **macOS and
   Linux**, including bidirectional `nats`-CLI interop for KV/ObjectStore/Services,
   deterministic reset/recovery tests (delete the consumer mid-watch → resume with
   no gap or dup), and leak/regression tests each shown to fail without their fix.
@@ -252,13 +253,13 @@ niche parity/throughput work, not a first-class blocker:
    watch (ordered's primary use) reads the engine directly and is low-throughput, so
    this is deferred as higher-risk, lower-value.
 
-## Recommendation: upstream, don't fork
+## Upstreaming
 
-This work is deliberately shaped as a contribution, not a private fork: it
-matches the library's style and the nats.go wire/semantic conventions, is
-additive and backward-compatible, and includes a genuine bug fix that benefits
-every user. The pragmatic path is to **propose it upstream to
-`nats-io/nats.swift`**, in reviewable slices:
+This work is deliberately shaped as a clean contribution, not a throwaway fork: it
+matches the library's style and the nats.go wire/semantic conventions, is additive
+and backward-compatible, and includes a genuine bug fix that benefits every user.
+So upstreaming stays on the table. For now this is a **maintained public fork**;
+if it does go upstream to `nats-io/nats.swift`, the sane path is reviewable slices:
 
 1. The `AckFuture` CAS fix first — a small, clear, standalone bug fix.
 2. In-memory credentials, `ignoreDiscoveredServers`, and the connection
@@ -272,9 +273,7 @@ every user. The pragmatic path is to **propose it upstream to
    durable/queue-group push consumers) — each is independent and backward-
    compatible, so it can land in any order after the surface it extends.
 
-A maintained private fork is the fallback if upstreaming stalls, but it is a
-standing maintenance cost and should be a last resort. Either way, the four
-the gaps that motivated this are closed and then some: the Swift service could
-drop its hand-rolled KV, its temp-credentials file, and its connection/reconnect
-workarounds — and now also has ObjectStore and a Service framework — and use the
-library directly.
+Either way, the four gaps that motivated this are closed and then some: the Swift
+service could drop its hand-rolled KV, its temp-credentials file, and its
+connection/reconnect workarounds — and now also has ObjectStore and a Service
+framework — and use the library directly.

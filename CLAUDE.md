@@ -10,7 +10,7 @@ NATS.swift is a Swift client library for the NATS messaging system, providing as
 - **Services**: the NATS micro Service API (endpoints/groups, `$SRV` discovery, per-endpoint stats)
 - **NatsServer**: Test server utilities for integration testing
 
-This is the `firstclass-kv` branch, which extends upstream `nats.swift` (Core NATS only) with the full JetStream + Services surface above and builds under the Swift 6 language mode. See `FIRSTCLASS.md` for the fork-vs-upstream matrix.
+This is a fork of upstream `nats.swift` (Core NATS only), living on `main`, that adds the full JetStream + Services surface above and builds under the Swift 6 language mode. See `FIRSTCLASS.md` for the fork-vs-upstream matrix.
 
 ## Build and Test Commands
 
@@ -109,7 +109,7 @@ Integration tests use `NatsServer` helper to spawn local NATS server instances w
 - Requires a Swift 6.0+ toolchain; the package builds in the Swift 6 language mode (`swiftLanguageModes: [.v6]`) with strict concurrency enforced as errors.
 - WebSocket upgrade support available for browser-compatible connections
 - Batch message processing optimized with `BatchBuffer` for performance
-- CI (`.github/workflows/ci.yml`): macOS build + test, iOS build, Linux (`swift:6.2` container) build + test, swift-format lint, and DocC build. The full suite (308 tests) passes on both macOS and Linux.
+- CI (`.github/workflows/ci.yml`): macOS build + test, iOS build, Linux (`swift:6.2` container) build + test, swift-format lint, and DocC build. The full suite (332 tests) passes on both macOS and Linux.
 - Cross-platform note: CryptoKit / Combine / `URLSession` file reads are Apple-only; use `#if canImport(CryptoKit)` + `Crypto`, avoid Combine, and read local files with `Data(contentsOf:)` (see `Sources/JetStream/ObjectStore.swift` and `Sources/Nats/NatsConnection.swift`).
 
 ## Testing gotchas
