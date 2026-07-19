@@ -1,6 +1,7 @@
 ![NATS Swift Client](./Resources/Logo@256.png)
 
 [![License Apache 2](https://img.shields.io/badge/License-Apache2-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
+[![ci](https://github.com/shadone/nats.swift/actions/workflows/ci.yml/badge.svg)](https://github.com/shadone/nats.swift/actions/workflows/ci.yml)
 
 # NATS Swift Client (fork)
 
@@ -26,10 +27,12 @@ affects every upstream user.
   silent drop) over an amortized-O(1) buffer (was O(n²) drain), plus three
   adversarial correctness sweeps over the transport, reset engine, and parser.
 
-**Status:** 332 tests, 0 failures, green on macOS and Linux (iOS build in CI).
-Full fork-vs-upstream matrix and the commit-by-commit story: [FIRSTCLASS.md](./FIRSTCLASS.md).
-Not affiliated with the NATS.io maintainers and not submitted upstream — pin it
-yourself if you want it.
+**Status:** 334 tests, 0 failures, green on macOS and Linux (Swift 6.0 build floor,
+6.1/6.2 tested; iOS build in CI). Reliability is treated as first-class — a release-mode
+consumer-stress gate on every push, plus a nightly soak, 3-node cluster failover, and
+fault-injection suite; see [TESTING.md](./TESTING.md). Full fork-vs-upstream matrix and
+the commit-by-commit story: [FIRSTCLASS.md](./FIRSTCLASS.md). Not affiliated with the
+NATS.io maintainers and not submitted upstream — pin it yourself if you want it.
 
 ---
 
