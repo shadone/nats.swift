@@ -57,7 +57,7 @@ swift-format format --in-place --configuration .swift-format -r Sources Tests
 
 **ConnectionHandler** (`Sources/Nats/NatsConnection.swift`): Internal class implementing `ChannelInboundHandler`. Handles the network connection lifecycle, reconnection logic, and protocol-level communication with NATS servers. Uses `NIOLockedValueBox` and `ManagedAtomic` for thread-safe state management.
 
-**NatsMessage** & **NatsSubscription**: Message handling and subscription management with support for headers and wildcards. Subscriptions implement `AsyncSequence` for message iteration.
+**NatsMessage** & **NatsSubscription**: Message handling and subscription management with support for headers and wildcards. Subscriptions implement `AsyncSequence` for message iteration. `NatsSubscription.unsubscribe()` is NOT idempotent — it throws `subscriptionClosed` if already closed (and `connectionClosed` first if the connection is down); route repeated/racing teardown through a once-guard that tolerates `subscriptionClosed`.
 
 **JetStreamContext** (`Sources/JetStream/JetStreamContext.swift`): Entry point for JetStream operations, manages streams and consumers with configurable prefixes/domains; also hosts async batched publish (`publishAsync`).
 
@@ -111,3 +111,12 @@ Integration tests use `NatsServer` helper to spawn local NATS server instances w
 - Batch message processing optimized with `BatchBuffer` for performance
 - CI (`.github/workflows/ci.yml`): macOS build + test, iOS build, Linux (`swift:6.2` container) build + test, swift-format lint, and DocC build. The full suite (308 tests) passes on both macOS and Linux.
 - Cross-platform note: CryptoKit / Combine / `URLSession` file reads are Apple-only; use `#if canImport(CryptoKit)` + `Crypto`, avoid Combine, and read local files with `Data(contentsOf:)` (see `Sources/JetStream/ObjectStore.swift` and `Sources/Nats/NatsConnection.swift`).
+
+## Testing gotchas
+
+- Before a full `swift test`, clear stale processes — a machine sleep mid-run leaves a wedged `xctest` (multi-hour etime) and orphaned servers that block later runs: `pkill -9 -f xctest; pkill -9 -f "nats-server -p -1"`, then re-run.
+- Fix lint with `swift format format --in-place <files>` rather than hand-wrapping — it resolves `LineLength`/`AddLines`/`OrderedImports` automatically. (Place a regular import before any `#if canImport(...)` block; OrderedImports rejects the reverse.)
+- Async tests that can hang (awaiting delivery/close/reconnect) bound the wait with a `withTaskGroup` timeout task so a regression fails fast instead of wedging the suite (see `ConnectionStateTests`, `SubscriptionLifecycleTests`).
+- New XCTest cases: match the file's convention — some register in a `static let allTests` array (legacy manifest), others rely on auto-discovery.
+- Swift 6 strict concurrency forbids capturing a mutable local or `weak var` in a `@Sendable`/task-group closure; wrap it in a small `@unchecked Sendable` box in test code.
+- `msg.payload` is `Data?` (optional); JetStream `next(timeout:)` / pull `fetch(batch: 1)` create a reply-inbox subscription per call.
