@@ -168,7 +168,7 @@ extension JetStreamContext {
     }
 }
 
-public struct JetStreamAPIResponse: Codable {
+public struct JetStreamAPIResponse: Codable, Sendable {
     public let type: String
     public let error: JetStreamError.APIError
 }

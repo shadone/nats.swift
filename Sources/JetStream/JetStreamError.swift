@@ -17,7 +17,7 @@ import Nats
 public protocol JetStreamErrorProtocol: Error, CustomStringConvertible {}
 
 public enum JetStreamError {
-    public struct APIError: Codable, Error {
+    public struct APIError: Codable, Error, Sendable {
         public var code: UInt
         public var errorCode: ErrorCode
         public var description: String
@@ -980,3 +980,9 @@ public enum Response<T: Codable>: Codable {
         }
     }
 }
+
+// Conditionally Sendable so a decoded `Response<T>` can cross an actor boundary
+// (e.g. an OrderedConsumer fetching `ConsumerInfo`) whenever its payload is
+// Sendable. Swift 6.2 lets this transfer via region isolation, but Swift 6.0/6.1
+// — which the macOS/iOS CI runners use — require the explicit conformance.
+extension Response: Sendable where T: Sendable {}
