@@ -7,50 +7,21 @@ on:
     branches: [ main, release/* ]
 
 jobs:
-  macos:
-    name: macOS build + test (nats-server ${{ matrix.nats_server }})
-    runs-on: macos-15
-    strategy:
-      fail-fast: false
-      matrix:
-        # The suite needs nats-server >= 2.11 (per-message TTL / subject-delete markers).
-        # Add older pinned versions here once verified against them.
-        nats_server: [ latest ]
-    steps:
-    - name: Checkout the code
-      uses: actions/checkout@v4
-    - name: Install nats-server
-      run: curl --fail https://binaries.nats.dev/nats-io/nats-server/v2@${{ matrix.nats_server }} | PREFIX='/usr/local/bin' sh
-    - name: Install nats CLI
-      # The wire-compat interop tests (KV / ObjectStore / Services) shell out to `nats`.
-      # Without it they XCTSkip; installing it makes them actually run.
-      run: brew install nats-io/nats-tools/nats
-    - name: Versions
-      run: |
-        swift --version
-        nats-server -v
-        nats --version
-    - name: Build (debug, all targets)
-      run: swift build
-    - name: Build (release)
-      run: swift build -c release
-    - name: Test
-      run: swift test
-
-  linux:
+  # Linux carries the bulk of the matrix -- cheaper runners, and the official swift:<ver> images
+  # give exact toolchain coverage. macOS is kept lean (Apple-only CryptoKit paths + iOS).
+  linux-test:
     name: Linux build + test (Swift ${{ matrix.swift }})
     runs-on: ubuntu-latest
     container: swift:${{ matrix.swift }}
     strategy:
       fail-fast: false
       matrix:
-        swift: [ "6.2" ]
+        # The README claims Swift 6.0+, so CI must actually build on the floor. 6.0/6.1 catch the
+        # region-isolation / Sendable differences that a newer local toolchain silently allows.
+        swift: [ "6.0", "6.1", "6.2" ]
     steps:
-    - name: Checkout the code
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
     - name: Install build prerequisites (libsodium, curl)
-      # nkeys.swift -> swift-sodium links the system libsodium (the swift image lacks its headers);
-      # the nats binary installers below need curl, which the swift image does not ship.
       run: |
         apt-get update -qq
         apt-get install -y -qq libsodium-dev curl
@@ -68,12 +39,85 @@ jobs:
     - name: Test
       run: swift test
 
+  linux-release-stress:
+    name: Linux release + consumer stress
+    runs-on: ubuntu-latest
+    container: swift:6.2
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install build prerequisites (libsodium, curl)
+      run: |
+        apt-get update -qq
+        apt-get install -y -qq libsodium-dev curl
+    - name: Install nats-server and nats CLI
+      run: |
+        curl --fail https://binaries.nats.dev/nats-io/nats-server/v2@latest | PREFIX='/usr/local/bin' sh
+        curl --fail https://binaries.nats.dev/nats-io/natscli/nats@latest | PREFIX='/usr/local/bin' sh
+    - name: Build (release)
+      run: swift build -c release && swift build -c release --build-tests
+    - name: Test (release)
+      run: swift test -c release
+    - name: Consumer delivery stress (release)
+      # Loops the delivery-race-prone consumer scenarios. A lifetime/delivery regression (like the
+      # dropped-handle ordered-consumer stall) shows here as a scenario timeout even when the
+      # single-shot debug suite stays green -- the release harness is the reliable reproducer.
+      run: |
+        nats-server -js -p 4222 -sd "$RUNNER_TEMP/js" &
+        sleep 2
+        for i in $(seq 1 20); do
+          echo "== stress iteration $i =="
+          ./.build/release/PerfBench \
+            --scenario orderedConsume,pushConsume,pullConsume,pushConsumeHB --msgs 3000 \
+            || { echo "stress iteration $i FAILED (a consumer stalled)"; exit 1; }
+        done
+
+  linux-tsan:
+    name: Linux ThreadSanitizer (informational)
+    runs-on: ubuntu-latest
+    container: swift:6.2
+    # Informational for now: TSan slows the client ~2-5x, which can trip the tightest
+    # timing-bounded tests (e.g. the <4s reconnect-recovery assertion). Promote to a hard gate
+    # once those are tuned for the sanitizer. Real data-race reports are still surfaced in the log.
+    continue-on-error: true
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install build prerequisites (libsodium, curl)
+      run: |
+        apt-get update -qq
+        apt-get install -y -qq libsodium-dev curl
+    - name: Install nats-server and nats CLI
+      run: |
+        curl --fail https://binaries.nats.dev/nats-io/nats-server/v2@latest | PREFIX='/usr/local/bin' sh
+        curl --fail https://binaries.nats.dev/nats-io/natscli/nats@latest | PREFIX='/usr/local/bin' sh
+    - name: Test (thread sanitizer)
+      run: swift test --sanitize=thread
+
+  macos:
+    name: macOS build + test
+    runs-on: macos-15
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install nats-server
+      run: curl --fail https://binaries.nats.dev/nats-io/nats-server/v2@latest | PREFIX='/usr/local/bin' sh
+    - name: Install nats CLI
+      # The wire-compat interop tests (KV / ObjectStore / Services) shell out to `nats`; without it
+      # they XCTSkip. macOS is also the only place the Apple CryptoKit ObjectStore path is tested.
+      run: brew install nats-io/nats-tools/nats
+    - name: Versions
+      run: |
+        swift --version
+        nats-server -v
+        nats --version
+    - name: Build
+      run: swift build
+    - name: Test
+      run: swift test
+
   ios:
     name: iOS build
     runs-on: macos-15
     steps:
-    - name: Checkout the code
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
     - name: List schemes
       run: xcodebuild -list
     - name: Build library products for iOS
@@ -87,8 +131,7 @@ jobs:
     name: swift-format lint
     runs-on: macos-15
     steps:
-    - name: Checkout the code
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
     - name: Install swift-format
       run: brew install swift-format
     - name: Run check
@@ -98,10 +141,8 @@ jobs:
     name: DocC build
     runs-on: macos-15
     steps:
-    - name: Checkout the code
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
     - name: Build documentation (Nats, JetStream, Services)
-      # Verifies the DocC catalogs + symbol graphs build with no unresolved references.
       run: |
         for target in Nats JetStream Services; do
           echo "== DocC: $target =="
