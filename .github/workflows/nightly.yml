@@ -1,0 +1,111 @@
+name: nightly
+
+# Heavier reliability suites that are too slow for every push: a soak run, real 3-node cluster
+# failover, and toxiproxy fault injection. Scheduled nightly; also runnable on demand.
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+jobs:
+  soak:
+    name: Soak + scenario suite
+    runs-on: ubuntu-latest
+    container: swift:6.2
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install build prerequisites
+      run: |
+        apt-get update -qq
+        apt-get install -y -qq libsodium-dev curl procps
+    - name: Install nats-server and nats CLI
+      run: |
+        curl --fail https://binaries.nats.dev/nats-io/nats-server/v2@latest | PREFIX='/usr/local/bin' sh
+        curl --fail https://binaries.nats.dev/nats-io/natscli/nats@latest | PREFIX='/usr/local/bin' sh
+    - name: Build Scenarios (release)
+      run: swift build -c release --product Scenarios
+    - name: Self-contained scenarios
+      run: |
+        nats-server -js -p 4222 -sd "$RUNNER_TEMP/js" &
+        sleep 2
+        for s in kv-watch object-transfer work-queue async-publish slow-consumer; do
+          echo "== scenario: $s =="
+          ./.build/release/Scenarios "$s" || { echo "$s FAILED"; exit 1; }
+        done
+        SCEN_DURATION=10 ./.build/release/Scenarios service || { echo "service FAILED"; exit 1; }
+    - name: Live-consume soak (5 min, contiguous no-loss/no-dup)
+      run: |
+        pkill -f "nats-server -js -p 4222" || true
+        sleep 1
+        nats-server -js -p 4222 -sd "$RUNNER_TEMP/js-soak" &
+        sleep 2
+        SCEN_DURATION=300 ./.build/release/Scenarios live-consume \
+          || { echo "live-consume soak FAILED"; exit 1; }
+
+  cluster:
+    name: 3-node cluster failover
+    runs-on: ubuntu-latest
+    container: swift:6.2
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install build prerequisites
+      run: |
+        apt-get update -qq
+        apt-get install -y -qq libsodium-dev curl procps
+    - name: Install nats-server and nats CLI
+      run: |
+        curl --fail https://binaries.nats.dev/nats-io/nats-server/v2@latest | PREFIX='/usr/local/bin' sh
+        curl --fail https://binaries.nats.dev/nats-io/natscli/nats@latest | PREFIX='/usr/local/bin' sh
+    - name: Build Scenarios (release)
+      run: swift build -c release --product Scenarios
+    - name: Cluster up, run failover scenario, cluster down
+      run: |
+        ./Sources/Scenarios/cluster/cluster-up.sh
+        ./.build/release/Scenarios cluster
+        rc=$?
+        ./Sources/Scenarios/cluster/cluster-down.sh --wipe || true
+        exit $rc
+
+  fault:
+    name: Fault injection (toxiproxy, best-effort)
+    runs-on: ubuntu-latest
+    container: swift:6.2
+    # Best-effort: the toxiproxy binary download / timing is more fragile than the other suites.
+    # Promote to a hard gate once it's proven stable in nightly.
+    continue-on-error: true
+    env:
+      TOXIPROXY_VERSION: "2.11.0"
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install build prerequisites
+      run: |
+        apt-get update -qq
+        apt-get install -y -qq libsodium-dev curl jq procps
+    - name: Install nats-server
+      run: curl --fail https://binaries.nats.dev/nats-io/nats-server/v2@latest | PREFIX='/usr/local/bin' sh
+    - name: Install toxiproxy
+      run: |
+        base="https://github.com/Shopify/toxiproxy/releases/download/v${TOXIPROXY_VERSION}"
+        curl -fsSL "$base/toxiproxy-server-linux-amd64" -o /usr/local/bin/toxiproxy-server
+        curl -fsSL "$base/toxiproxy-cli-linux-amd64" -o /usr/local/bin/toxiproxy-cli
+        chmod +x /usr/local/bin/toxiproxy-server /usr/local/bin/toxiproxy-cli
+    - name: Build Scenarios (release)
+      run: swift build -c release --product Scenarios
+    - name: Live-consume survives a network cut
+      run: |
+        nats-server -js -p 4300 -sd "$RUNNER_TEMP/js-fault" &
+        sleep 2
+        ./Sources/Scenarios/fault/toxiproxy-up.sh
+        # Run the scenario through the proxy for 45s; cut the link mid-run, then restore.
+        SCEN_DURATION=45 NATS_URL=nats://127.0.0.1:4666 ./.build/release/Scenarios live-consume &
+        scen=$!
+        sleep 15
+        echo "== injecting network cut =="
+        ./Sources/Scenarios/fault/fault-cut.sh
+        sleep 8
+        echo "== restoring link =="
+        ./Sources/Scenarios/fault/fault-restore.sh
+        wait $scen
+        rc=$?
+        ./Sources/Scenarios/fault/toxiproxy-down.sh || true
+        exit $rc
